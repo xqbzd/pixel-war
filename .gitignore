@@ -8,5 +8,9 @@
 # 本地导出的可玩版本（分发给朋友用 Release，不进仓库）
 /build/
 
+# 导出中间产物：只把打好的 zip 发出去，exe 和临时目录不进仓库
+/dist/pixel-war.exe
+/dist/pixel-war-windows/
+
 # 编辑器插件的自动更新备份（5.8 MB 的 zip，纯开发用）
 addons/.godot_ai_update/

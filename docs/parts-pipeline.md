@@ -1054,6 +1054,27 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
   得在 `can_place()` 里重新加一条要求（`_collect_pairs()` 的返回值就够用）。
 * 建造枪是贴着相机渲染的简化做法（贴近墙面时可能穿模），弹匣/枪口都只是方块拼的占位美术。
 
+### 发布 Windows 版（给朋友玩）
+
+```
+# 一次性：装导出模板（编辑器 → 编辑器 → 管理导出模板 → 下载并安装；或把
+#   Godot_v<版本>-stable_export_templates.tpz 解压到 %APPDATA%\Godot\export_templates\<版本>.stable\）
+godot --headless --path . --export-release "Windows Desktop" dist/pixel-war.exe
+```
+
+* 预设写在 `export_presets.cfg`：Windows x86_64、`embed_pck = true`（单文件 exe）、
+  输出到 `dist/pixel-war.exe`；打包时把 exe 和 `操作.txt` 塞进 `dist/pixel-war-windows/`，
+  `tar -a -c -f dist/pixel-war-windows.zip -C dist pixel-war-windows` 出 zip（约 46 MB）。
+* ⚠️ **`include_filter="*.txt,*.vox"` 不能删**：部件文件 / 载具文件 / `data/*.txt` 和 `.vox`
+  都是运行时用 `FileAccess` 读的**普通文本**，Godot 默认只打"资源" —— 少了这个过滤器，
+  导出的包里**一个零件数据都没有**（游戏能启动，但读不出任何部件/载具）。
+  验证：`rg -a -c "wheel_slip_ref" dist/pixel-war.exe`（>0 = 数据真的进去了）。
+* 冒烟：`dist/pixel-war.exe --headless --quit`（只看有没有脚本/缺文件的报错；
+  退出时那两条 "ObjectDB instances leaked" 是 MCP 助手 autoload 的老毛病，无害）。
+* 仓库里放的是**打好的 zip**。以后再发版建议走 GitHub Releases 传附件
+  （网页上两步，不往 git 历史里塞大文件）。
+
+
 ### 调试提示：改了脚本要重启，别被旧进程骗
 
 Godot 的游戏进程**不会热重载脚本**：改了 `.gd` 之后，正在跑的那一局会一直用旧代码，
