@@ -176,6 +176,11 @@ func rebuild_arc(part_boxes: Array) -> void:
 	_arc_free.fill(false)
 	# 预筛：只有**转点附近**的零件才可能被枪管碰到（枪管最远伸到 |枪口-转点|）。
 	# 一辆车 200 多个零件，不筛的话 128 个格子 × 全表 = 每次重算几万次比对。
+	# ⚠️ 距离必须在**同一套坐标**里比：`part_boxes` 是**底盘本地**的，所以转点也要先用
+	# `transform` 搬到车身系（`transform * _pivot`）。踩过的坑：直接拿**零件本地**的 `_pivot`
+	# 去比 → 离原点远的转塔会把**所有**障碍都筛掉、射界变成"全通"，
+	# 表现出来就是"并排八个机枪一起转，靠右几台正常被挡、靠左几台横穿别人"（用户报的）。
+	var pivot_local: Vector3 = transform * _pivot
 	var near := []
 	for i in part_boxes.size():
 		if i == int(get_meta("part_index", -1)):
@@ -185,7 +190,7 @@ func rebuild_arc(part_boxes: Array) -> void:
 		if box.size.x <= 0.001 or box.size.y <= 0.001 or box.size.z <= 0.001:
 			continue
 		var centre := box.get_center()
-		if centre.distance_to(_pivot) > _gun_reach() + box.size.length() * 0.5 + 0.1:
+		if centre.distance_to(pivot_local) > _gun_reach() + box.size.length() * 0.5 + 0.1:
 			continue
 		near.append(entry)
 	for band in ARC_BANDS:

@@ -484,6 +484,38 @@ func test_weapon_collision_box_excludes_the_sweeping_barrel() -> void:
 		assert_eq(cube.collision_bounds(), cube.body_bounds(), "普通零件的碰撞盒不变")
 
 
+## 真实射界的"障碍预筛"必须用**同一套坐标**比距离（零件盒是底盘本地的）。
+## ⚠️ 踩过的坑：拿"底盘本地的盒中心"去比"**零件本地**的转点"，两个坐标系混在一起，
+## 离原点远的转塔会把所有障碍都筛掉 → 射界全通、转起来横穿别人的主体。
+## 用户的原话："并排紧贴放八个机枪一起左转，右边四台正常被左侧主体遮挡，左边四台穿模了"。
+func test_turret_arc_sees_neighbours_far_from_the_origin() -> void:
+	var library := _library()
+	var def: PartDef = library.get_def(MG_ID)
+	if def == null:
+		return
+	var turret := Turret.new()
+	# 把这台转塔摆到离原点很远的地方（底盘本地 x = 30，模拟"并排第八台"）
+	var place := Transform3D(Basis(), Vector3(30.0, 0.0, 0.0))
+	assert_eq(turret.setup(def, place, library), "", "转塔能装起来")
+	turret.set_meta("part_index", 7)   # 自己那件不在这个数组里（数组是"别的零件"）
+	# 它旁边放一块零件，**压在枪管路径中段**（位置同样在底盘本地坐标里）
+	var pivot: Vector3 = def.weapon_pivot()["pivot"]
+	var mid: Vector3 = pivot + (def.weapon_muzzle() - pivot) * 0.6
+	var blocker := AABB(place * mid - Vector3.ONE * 0.5, Vector3.ONE)
+	turret.rebuild_arc([{"box": blocker, "name": "旁边的机枪 #1"}])
+	assert_true(turret.arc_ready(), "射界要算得出来")
+	assert_true(
+		turret.arc_free_ratio() < 0.999,
+		"★ 离原点很远的转塔也必须看得见旁边的零件（不能因为坐标混了就全通）：%.3f"
+			% turret.arc_free_ratio()
+	)
+	assert_true(
+		turret.arc_reason().contains("旁边的机枪"),
+		"而且要说清是它挡的：%s" % turret.arc_reason()
+	)
+	turret.free()
+
+
 ## **真实射界**（用户 2026-10-14 的设计）：射界按"水平扇区 × 俯仰带"切格子，
 ## 逐格判"枪管摆到那儿会不会压到别的零件"，再取**和初始枪口朝向连通**的那一片 ——
 ## 只有这一片能开火。
