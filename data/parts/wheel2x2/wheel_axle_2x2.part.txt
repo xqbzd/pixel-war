@@ -27,6 +27,37 @@ hp        = 6000
 pp        = 15
 
 # ── 轮子参数（只有这个部件用得上；每个轮轴各自读自己这一组）──────────────
+# 🚩 2026-10-15：轮胎力模型**换成了 Pacejka**（移植自 nani_raycast_wheel.gd，MIT，
+#    见 reference/nani_raycast_wheel/）。**下面这些键才是现在生效的**：
+#
+#   【悬挂】力 = 压缩量 × wheel_stiffness + wheel_damper_compression × 压缩速度
+#     wheel_stiffness            弹簧刚度 N/格（静止下沉 = 单轮负重 ÷ 它）
+#     wheel_damper_compression   阻尼 N·秒/格（**只有这一个生效**；
+#                                wheel_damper_relaxation 已不用 —— 新模型只有一份阻尼）
+#     wheel_rest_length          悬挂自由长度（格）
+#     wheel_suspension_travel    行程上限（格），压到底就顶住
+#     wheel_peak_force_car_weights  单轮力上限 = 整车重量 × 它（削尖峰用；0 = 不截断）
+#
+#   【轮胎】力 = 法向载荷 × peak × sin(shape·atan(stiff·s − curve·(stiff·s − atan(stiff·s))))
+#            s 侧向 = 速度方向与车轮朝向的夹角；s 纵向 = (ω·半径 − 前进速度)/|前进速度|
+#     wheel_grip_factor    抓地总倍率（乘在侧/纵轮胎力上）：>1 更粘，<1 更滑
+#     wheel_lat_pacejka    侧向四系数  peak stiff curve shape（原作者值 1 10 0 1.35）
+#     wheel_long_pacejka   纵向四系数  peak stiff curve shape（原作者值 1 10 0 1.65）
+#       小滑移时侧偏刚度 ≈ 载荷 × peak × stiff × shape；想"更咬地"就加 peak 或 stiff。
+#     驱动/刹车走**力矩**：油门把它换算成"驱动轮力矩 = 推力 × 半径"，
+#       刹车力矩 = wheel_engine_force × 半径 × 1.5（想单独调刹车告诉我，我接个键）。
+#     低速（< 0.1 格/秒）时**不走 Pacejka**：直接给"把残余速度削平"的力 —— 这是治抖的关键。
+#
+#   【转向 / 限速 / 视觉】照旧生效：
+#     wheel_steer_max / wheel_steer_speed / wheel_steer_return_speed
+#     wheel_max_speed（m/s，超了按余弦衰减收油）
+#     wheel_rays / wheel_ray_slack / wheel_sus_sector / wheel_ray_offset
+#     wheel_engine_force（N，换算成驱动力矩）
+#
+#   【已失效】（新模型不再读，留着不报错）：wheel_mu、wheel_friction、
+#     wheel_grip_gain、wheel_slip_falloff、wheel_slip_ref、wheel_brake、
+#     wheel_brake_gain、wheel_roll_gain、wheel_damper_relaxation、wheel_mu_per_friction、
+#     wheel_mu_max。
 # 标定（2026-10-14 改）：1 cube = 0.5 米 ⇒ project.godot 的重力是 19.6 cube/s²
 # （= 真实 9.8 m/s²）。**下面这些"力"不跟着标定变** —— 它们是"格世界"里的数，
 # 决定的是 a/g（动力/重力比）这个手感；标定变小/变大时它们要不要缩，是另一回事。

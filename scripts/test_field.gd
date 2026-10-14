@@ -1963,8 +1963,10 @@ func _apply_wheel(veh: Dictionary, entry: Dictionary, delta: float) -> void:
 		if absf(along) < cutoff and braking:
 			long_force = -along / delta * wheel_mass
 		else:
+			# ⚠️ 分子是 `ω·r − 前进速度`（不是反过来）：油门让 ω 变大 → 滑移为正 → 轮胎力朝前。
+			# 写成 `前进速度 − ω·r` 会把油门变成倒车（用户报的"前后反了"）。
 			var long_slip := (
-				along - float(entry["ang_vel"]) * radius
+				float(entry["ang_vel"]) * radius - along
 			) / maxf(absf(along), 0.0000001)
 			long_force = pacejka(push, long_slip, entry["long_pacejka"] as Array)
 		lat_force *= float(entry["grip_factor"])
