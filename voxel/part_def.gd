@@ -123,6 +123,11 @@ var wheel_grip_factor := 1.0
 ## 小滑移时侧偏刚度 ≈ 载荷 × peak × stiff × shape，大滑移自动饱和（不会把车掀翻）。
 var wheel_lat_pacejka := [1.0, 10.0, 0.0, 1.35]
 var wheel_long_pacejka := [1.0, 10.0, 0.0, 1.65]
+## **轮子自己的质量（kg）** —— 只管两件事：① 自转转动惯量 `I = ½·m·r²`（决定轮子能不能跟上车速、
+## 打不打滑）；② 低速时"把残余速度削平"的那一下用多大力。**不是簧上质量**。
+## 参考实现（nani_raycast_wheel）用的是 12；写 0 时退回"按车重平摊"的旧行为（会偏大很多、
+## 表现为"油门下去车几乎不动、极速很低"）。
+var wheel_mass := 0.0
 ## 阻尼系数 N·秒/格：压缩（往下压）和回弹（伸出去）可以不一样。
 ## 参考值（想要"刚好不振荡"）：临界阻尼 c = 2 × √(刚度 × 单轮质量)，
 ## 取它的 0.4~0.7 倍比较舒服；比临界大 = 发闷，小了 = 过坎会弹几下。
@@ -1100,6 +1105,9 @@ func _apply(key: String, value: String, line_no: int) -> void:
 				wheel_long_pacejka = nums
 			else:
 				_warn("第 %d 行：wheel_long_pacejka 需要 4 个数 peak stiff curve shape" % line_no)
+		"wheel_mass":
+			# 轮子自己的质量 kg（自转惯量 + 低速削平力用）。0 = 按车重平摊（旧行为）
+			wheel_mass = _parse_float(value, wheel_mass, line_no, key, 0.0)
 		"wheel_suspension_max_force":
 			wheel_suspension_max_force = _parse_float(
 				value, wheel_suspension_max_force, line_no, key, 0.0

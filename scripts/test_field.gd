@@ -805,9 +805,14 @@ func _add_wheel(veh: Dictionary, spec: Dictionary, wheel_count: int) -> void:
 		"rest": rest,
 		"travel": travel,
 		"max_force": max_force,
-		# 簧上质量（单轮）：隐式阻尼要用它把"这一帧能改变多少速度"算出来（见 _apply_wheel）。
-		# 这是**数值**参数，不是手感参数 —— 不需要按车重手动调。
-		"wheel_mass": maxf(1.0, mass / float(count)),
+		# ⚠️ **轮子自己的质量**（部件文件 `wheel_mass`；0 才退回"按车重平摊"）。
+		# 它决定**自转转动惯量** `I = ½·m·r²` —— 用簧上质量（每轮几百 kg）会让惯量大二十几倍，
+		# 轮子转不起来 → 纵向滑移一直是负的（等于一直在刹车）→ 油门下去车几乎不动、极速很低
+		# （用户 2026-10-15 报的"前进指令和最高速度完全不对"就是这个）。
+		# 低速削平力也用它（照 nani_raycast_wheel 的用法）。
+		"wheel_mass": (
+			def.wheel_mass if (def != null and def.wheel_mass > 0.0) else maxf(1.0, mass / float(count))
+		),
 		# ── 轮胎力模型（Pacejka，移植自 nani_raycast_wheel.gd，MIT）──
 		"grip_factor": def.wheel_grip_factor if def != null else 1.0,
 		"lat_pacejka": (def.wheel_lat_pacejka if def != null else [1.0, 10.0, 0.0, 1.35]),
