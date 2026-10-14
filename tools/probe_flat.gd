@@ -64,7 +64,14 @@ func _initialize() -> void:
 			var entry: Dictionary = w
 			if bool(entry.get("contact", false)):
 				contact += 1
-			susp.append("%.3f" % float(entry.get("suspension", 0.0)))
+			# 每轮：压缩量 / 轮子角速度 / 纵向力 / 横向力 / 接触法向的竖直分量
+			susp.append("%.3f|%.2f|%+.0f|%+.0f|%.2f" % [
+				float(entry.get("dbg_depth", 0.0)),
+				float(entry.get("ang_vel", 0.0)),
+				float(entry.get("dbg_long", 0.0)),
+				float(entry.get("dbg_lat", 0.0)),
+				float(entry.get("dbg_normal_y", 0.0)),
+			])
 		var up: Vector3 = chassis.global_transform.basis.y.normalized()
 		print("%.2f  %7.3f  %8.3f  %7.3f  %6.1f°  %d/%d  %s" % [
 			float(step + 1) / 30.0, chassis.global_position.y,

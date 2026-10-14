@@ -1957,16 +1957,25 @@ func _apply_wheel(veh: Dictionary, entry: Dictionary, delta: float) -> void:
 		var cutoff := LOW_SPEED_CUTOFF            # 低速阈值（照它的 0.1）
 		var lat_force := 0.0
 		var long_force := 0.0
+		# 轮胎容量上限：低载荷/低速分支算出来的力**不许超过**轮胎本身能给的最大力
+		# （就是 Pacejka 在饱和滑移下的值 = 法向载荷 × peak）。没有这道闸，
+		# 低速"削平力"（−速度/delta × 质量）会算出十几 kN，把小车横着推飞。
+		var lat_cap := push * float((entry["lat_pacejka"] as Array)[0])
+		var long_cap := push * float((entry["long_pacejka"] as Array)[0])
 		# ★ **低速切换 = 它治抖的办法，别漏**：速度很小的时候不走 Pacejka，
 		#   直接给"这一帧把残余速度削平"的力（方程不发散 → 不抖）。
 		if absf(along) < cutoff and absf(side) < cutoff:
-			lat_force = -side / delta * wheel_mass
+			lat_force = clampf(-side / delta * wheel_mass, -lat_cap, lat_cap)
 		else:
 			var planar := sqrt(side * side + along * along)
 			var lat_slip := asin(clampf(-side / maxf(0.000001, planar), -1.0, 1.0))
 			lat_force = pacejka(push, lat_slip, entry["lat_pacejka"] as Array)
-		if absf(along) < cutoff and braking:
-			long_force = -along / delta * wheel_mass
+		# 纵向低速分支：**刹车时**、以及**没给油时**（drive_torque ≈ 0）都走"削平"。
+		# ⚠️ 第二种是必需的：不然静止时 `long_slip` 的分母 `max(|v|, 1e-7)` 会把数值噪声
+		# 放大成满滑移（±1）→ 满推力/满刹车 → 反过来把轮子越推越快（正反馈）。
+		# 参考实现靠"没油门时 ω 恒为 0"避免这件事，我们的 ω 会被噪声推动，所以要显式兜住。
+		if absf(along) < cutoff and (braking or absf(float(entry["drive_torque"])) <= 0.001):
+			long_force = clampf(-along / delta * wheel_mass, -long_cap, long_cap)
 		else:
 			# ⚠️ 分子是 `ω·r − 前进速度`（不是反过来）：油门让 ω 变大 → 滑移为正 → 轮胎力朝前。
 			# 写成 `前进速度 − ω·r` 会把油门变成倒车（用户报的"前后反了"）。
@@ -1990,6 +1999,14 @@ func _apply_wheel(veh: Dictionary, entry: Dictionary, delta: float) -> void:
 			net -= (brake_torque + ROLLING_RESISTANCE) * signf(ang_vel)
 			ang_vel += net / float(entry["wheel_moi"]) * delta
 		entry["ang_vel"] = ang_vel
+		# 调试用：把这一帧的接触/轮胎量记在 entry 上（`tools/probe_flat.gd` 会打出来，
+		# 用来定位"静止自己走"/"超过极速"这类问题 —— 看哪个量在静止时就不为零）。
+		entry["dbg_depth"] = depth
+		entry["dbg_normal_y"] = best_normal.y
+		entry["dbg_long"] = long_force
+		entry["dbg_lat"] = lat_force
+		entry["dbg_along"] = along
+		entry["dbg_slip"] = (float(entry["ang_vel"]) * radius - along) / maxf(absf(along), 0.0000001)
 		entry["push"] = push
 ## 一个接触点上的力：法向（`normal × push`）+ 横向抓地 + 纵向驱动/刹车（都按 mu × 法向力截断）。
 ## 增益 / 滑移衰减都从部件文件读（见 `_add_wheel()`），整圈射线条数也一样。
