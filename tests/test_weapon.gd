@@ -484,6 +484,33 @@ func test_weapon_collision_box_excludes_the_sweeping_barrel() -> void:
 		assert_eq(cube.collision_bounds(), cube.body_bounds(), "普通零件的碰撞盒不变")
 
 
+## 被水平挡住的枪**不能连俯仰一起冻死**（用户报的："被左右障碍挡住时上下也锁死"）。
+## `_clamp_to_arc()` 现在两个轴分别夹：保持当前俯仰先把水平走到头，再在那个水平角上走俯仰。
+func test_turret_clamp_keeps_pitch_free_when_yaw_is_blocked() -> void:
+	var library := _library()
+	var def: PartDef = library.get_def(MG_ID)
+	if def == null:
+		return
+	var turret := Turret.new()
+	assert_eq(turret.setup(def, Transform3D(Basis(), Vector3.ZERO), library), "", "转塔能装起来")
+	turret.set_meta("part_index", 7)
+	# 正侧方、和枪轴**同高**的位置放一块零件：俯仰 0° 时枪管会撞上它，
+	# 抬起来（枪管越过它）就不挡了 —— 正好用来验"水平挡了、俯仰还能动"。
+	var pivot: Vector3 = def.weapon_pivot()["pivot"]
+	var wall := AABB(pivot + Vector3(1.2, 0.0, 0.0) - Vector3.ONE * 0.5, Vector3.ONE)
+	turret.rebuild_arc([{"box": wall, "name": "侧面的零件"}])
+	assert_true(turret.arc_ready(), "射界要算得出来")
+	assert_true(turret.arc_allows(0.0, 0.0), "当前朝向（正前）本来是通的")
+	var wanted_yaw := deg_to_rad(60.0)
+	assert_false(turret.arc_allows(wanted_yaw, 0.0), "那个水平方向确实被挡着")
+	var clamped := turret._clamp_to_arc(wanted_yaw, deg_to_rad(25.0))
+	assert_true(clamped.x < wanted_yaw - 0.01, "水平被夹住，没转到障碍里：%.1f°" % rad_to_deg(clamped.x))
+	assert_almost_eq(
+		rad_to_deg(clamped.y), 25.0, 0.6, "★ 俯仰不该被水平连坐冻死（用户报的）"
+	)
+	turret.free()
+
+
 ## 真实射界的"障碍预筛"必须用**同一套坐标**比距离（零件盒是底盘本地的）。
 ## ⚠️ 踩过的坑：拿"底盘本地的盒中心"去比"**零件本地**的转点"，两个坐标系混在一起，
 ## 离原点远的转塔会把所有障碍都筛掉 → 射界全通、转起来横穿别人的主体。

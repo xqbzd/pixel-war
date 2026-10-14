@@ -261,22 +261,31 @@ func arc_reason() -> String:
 	return "被挡在射界外（转过去会穿过零件）"
 
 
-## 把目标角夹到真实射界里：从**当前**姿态朝目标一格一格走，走到走不动为止。
-## 于是"中间被挡、绕过去又空出来"的方向够不着（枪管不会穿模过去），
-## 而沿着连通域滑动是允许的（贴着障碍走）。
+## 把目标角夹到真实射界里：**水平和俯仰各夹各的**，尽量靠近目标。
+##
+## ⚠️ 原来是"从当前姿态朝目标走直线，撞墙就停" —— 于是水平被挡时**俯仰也被一起冻住**
+## （用户报的："枪械被左右障碍物挡住时，上下也被锁死"）。现在分两步：
+##   ① 保持当前俯仰，先往目标水平角走，走到不能走为止；
+##   ② 在那个水平角上，再往目标俯仰角走，走到不能走为止。
+## 每一步都是"合法姿态之间连续移动"，所以不会跨过被挡的那一片（连通域语义不变），
+## 但俯仰该动就动 —— 贴着障碍"顺着边滑"，尽可能接近瞄准位置。
 func _clamp_to_arc(target_yaw: float, target_pitch: float) -> Vector2:
 	if not _arc_ready or arc_allows(target_yaw, target_pitch):
 		return Vector2(target_yaw, target_pitch)
-	var here := Vector2(_yaw, _pitch)
-	var steps := 24
-	var last := here
+	var steps := 16
+	var yaw := _yaw
 	for i in range(1, steps + 1):
-		var t := float(i) / float(steps)
-		var probe := here.lerp(Vector2(target_yaw, target_pitch), t)
-		if not arc_allows(probe.x, probe.y):
+		var probe := _yaw + (target_yaw - _yaw) * float(i) / float(steps)
+		if not arc_allows(probe, _pitch):
 			break
-		last = probe
-	return last
+		yaw = probe
+	var pitch := _pitch
+	for i in range(1, steps + 1):
+		var probe := _pitch + (target_pitch - _pitch) * float(i) / float(steps)
+		if not arc_allows(yaw, probe):
+			break
+		pitch = probe
+	return Vector2(yaw, pitch)
 
 
 ## 枪口离转点多远（格）：`rebuild_arc()` 预筛"附近零件"用。
