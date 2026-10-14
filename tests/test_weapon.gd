@@ -449,6 +449,41 @@ func test_muzzle_flash_is_a_child_of_the_barrel() -> void:
 	turret.free()
 
 
+## 武器零件的**碰撞盒不含枪管**。
+##
+## ⚠️ 用户报的 bug：车体上的碰撞盒是**静止**的，而枪管会转（水平 360° + 俯仰）——
+## 用"三件并起来"的 AABB 当碰撞盒时，枪管转走以后盒子里剩下的就是**空气**：
+## 近距侧向射击的子弹会打在看不见的盒子上，还判到另一个炮台身上
+## （"明明离炮台实际判定还很远"）。所以碰撞盒只取**底座 + 支架**（1×1×1，基本不空）。
+func test_weapon_collision_box_excludes_the_sweeping_barrel() -> void:
+	var library := _library()
+	var def: PartDef = library.get_def(MG_ID)
+	if def == null:
+		return
+	var box := def.collision_bounds()
+	var body := def.body_bounds()
+	var muzzle: Vector3 = def.weapon_muzzle()
+	# 本体盒本来就该包住枪管（它是"三件并起来"的，车库/建造网格用）
+	assert_true(
+		body.position.z + body.size.z >= muzzle.z - 0.001,
+		"本体盒该包住枪管：盒 %s / 枪口 z %.4f" % [body, muzzle.z]
+	)
+	# 但**碰撞盒不该包住枪口** —— 枪管伸出去的那一截就是"虚空"的来源
+	assert_true(
+		box.position.z + box.size.z < muzzle.z - 0.1,
+		"碰撞盒不该包住枪口（枪管转走后那片是空气）：盒 %s / 枪口 z %.4f" % [box, muzzle.z]
+	)
+	# 底座 + 支架就是 1×1×1，不会因为枪管朝向变来变去而空出一大片
+	assert_true(
+		box.size.x <= 1.01 and box.size.y <= 1.01 and box.size.z <= 1.01,
+		"碰撞盒应该只有底座 + 支架：%s" % box
+	)
+	# 普通零件不受影响：碰撞盒 = 本体盒
+	var cube: PartDef = library.get_def("cube_full")
+	if cube != null:
+		assert_eq(cube.collision_bounds(), cube.body_bounds(), "普通零件的碰撞盒不变")
+
+
 ## **真实射界**（用户 2026-10-14 的设计）：射界按"水平扇区 × 俯仰带"切格子，
 ## 逐格判"枪管摆到那儿会不会压到别的零件"，再取**和初始枪口朝向连通**的那一片 ——
 ## 只有这一片能开火。

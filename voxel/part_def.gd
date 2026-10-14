@@ -623,6 +623,33 @@ func body_bounds() -> AABB:
 	return _body
 
 
+## **碰撞盒**用的包围盒：武器零件**不含枪管**（只取底座 + 支架）—— 见下面那段说明。
+##
+## ⚠️ 为什么不能直接用 `body_bounds()`（三件并起来的 AABB）：
+## 枪管是**会转**的（水平 360° + 俯仰），而车体上的碰撞盒是**静止**的一块盒子。
+## 枪管转走以后，那个盒子里剩下的就是**空气** —— 子弹会打在看不见的盒子上
+## （用户报的："接近侧向射击时子弹撞到虚空上，还判到另一个炮台上，离炮台实际判定还很远"）。
+## 底座不动、支架绕自己的中心转（AABB 几乎不变），所以碰撞盒只取这两件最稳：
+## 子弹打到的就是**看得见的底座/支架**，不会再打进空气。
+##
+## 代价：**枪管不给子弹判定**（打枪管会穿过去）。想两全就得把枪管的碰撞盒做成
+## "跟着 Turret 的 Yaw/Pitch 一起转"的独立受击盒（像轮子的轮胎受击盒那样），
+## 那是另一处改动，等有需要再说。
+func collision_bounds() -> AABB:
+	if weapon != "turret":
+		return body_bounds()
+	var box := AABB()
+	var first := true
+	for index in [0, weapon_yaw_model]:
+		var volume := weapon_volume(index)
+		if volume == null or volume.solid_count() == 0:
+			continue
+		var piece := tight_bounds(volume, Vector3.ZERO, Vector3(cubes))
+		box = piece if first else box.merge(piece)
+		first = false
+	return body_bounds() if first else box
+
+
 ## 重心判定点：零件的**几何中心**（在本地空间，单位 = cube）。
 ## 只在第一次算（`mesh_bounds()` 本来就缓存），所以游戏里每帧问它也是 O(1)；
 ## 想微调质量分布可以在部件文件里写 `center = x y z`（单位 = 体素）覆盖掉。

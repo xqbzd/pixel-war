@@ -77,8 +77,11 @@ func setup(
 		# 摆放变换（host 本地空间：玩家车就是底盘本地空间）
 		var place := BuildGrid.cell_transform(def, part["cell"], part["basis"])
 		place.origin += _local_offset
-		# 碰撞盒①：**本体**包围盒（轮胎是视觉件，靠整圈射线管车的支撑）
-		var local := BuildGrid.rotate_aabb(part["basis"], def.body_bounds())
+		# 碰撞盒①：**本体**包围盒（轮胎是视觉件，靠整圈射线管车的支撑）。
+		# ⚠️ 武器零件用 `collision_bounds()`：**不含会转的枪管** —— 拿"三件并起来"的盒子当碰撞盒时，
+		# 枪管转走以后盒子里剩下的就是空气，子弹会打在看不见的盒子上
+		# （用户报的"侧向射击撞到虚空、还判到另一个炮台上"）。
+		var local := BuildGrid.rotate_aabb(part["basis"], def.collision_bounds())
 		var box := AABB(place.origin + local.position, local.size)
 		_add_shape(box, i)
 		_part_box.append(box)
