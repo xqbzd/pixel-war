@@ -1160,6 +1160,14 @@ func _update_hud() -> void:
 		_hud.text += " · 射界 %.0f%%" % (turret.arc_free_ratio() * 100.0)
 		if not turret.arc_blocked_by.is_empty():
 			_hud.text += " · ⛔ %s（不能开火）" % turret.arc_blocked_by
+		# 武器多了以后，光看第一台不够用 —— 顺带报一下"现在有几台被挡"
+		if _turrets.size() > 1:
+			var stuck := 0
+			for other in _turrets:
+				if not other.arc_reason().is_empty():
+					stuck += 1
+			if stuck > 0:
+				_hud.text += " · 共 %d/%d 台被挡" % [stuck, _turrets.size()]
 	elif not _turret_problem.is_empty():
 		_hud.text += "\n武器装不上：%s" % _turret_problem
 	# 能量 / 开火记账（核心提供能量；打出去的每发都扣能量）
@@ -1560,8 +1568,21 @@ func _collect_clip_boxes(rig: VehicleRig, vehicle: VehicleDef) -> Array:
 func _refresh_turret_arcs() -> void:
 	if _clip_boxes.is_empty():
 		return
+	var all_blocked := 0
 	for turret in _turrets:
 		turret.rebuild_arc(_clip_boxes)
+		# 诊断（用户报"有些武器无法正常判定遮挡转动"）：射界**算不出来**（转塔没装好）或者
+		# **整片被挡**（枪管一转就穿零件）时必须留一句话 —— 否则那条枪会静默地"随便转、
+		# 被挡也照打"，查起来一头雾水。
+		if not turret.arc_ready():
+			push_warning("测试场：%s 的真实射界算不出来（转塔节点没装起来）" % turret.part_id)
+		elif turret.arc_free_ratio() <= 0.001:
+			all_blocked += 1
+	if all_blocked > 0:
+		push_warning(
+			"测试场：%d 台转塔的真实射界整片被挡（周围有零件压着枪管），它们转不了也打不了"
+			% all_blocked
+		)
 
 
 ## 能量 + 开火：整车一口能量池（核心提供上限与恢复），所有武器共用。

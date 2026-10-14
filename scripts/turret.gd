@@ -40,7 +40,11 @@ var projectile_life := 8.0       # 弹丸寿命（秒），见部件文件的 we
 var fire_interval := INF         # 两发之间的秒数（rpm 换算），INF = 不能开火
 ## 子弹从**枪口沿枪轴再外推**多少格生成：枪口正好贴在模型的面上，
 ## 不外推的话第一段射线会立刻打到自己车体的碰撞盒（用户定的"沿轴线向正方向补一格"）。
-const MUZZLE_PAD := 1.0
+## ⚠️ 2026-10-14 从 1.0 收到 0.05：那 1 格是**射线完全覆盖不到的死区**（子弹的连续检测
+## 从生成点才开始），于是"离枪口三格以内的零件"打不中、看着像穿透（用户报的）。
+## 收小之后不用再担心自吃：武器的碰撞盒**不含枪管**（见 `PartDef.collision_bounds()`），
+## 枪口本来就在自己的碰撞盒外面；留 0.05 只是防浮点擦边。
+const MUZZLE_PAD := 0.05
 ## 枪口闪光持续时间（秒）；火舌从枪口再往外伸 `FLASH_REACH` 格，闪完直接不画。
 const FLASH_TIME := 0.07
 ## 火舌从枪口往外的伸出量（格）
@@ -214,6 +218,11 @@ func arc_allows_current() -> bool:
 	if not _arc_ready:
 		return true
 	return arc_allows(_yaw, _pitch)
+
+
+## 真实射界算出来了没有（测试场用它做诊断：算不出来 = 这条枪形同没装转塔）
+func arc_ready() -> bool:
+	return _arc_ready
 
 
 func arc_allows(yaw_rad: float, pitch_rad: float) -> bool:

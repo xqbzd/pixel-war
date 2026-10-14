@@ -180,10 +180,13 @@ var _sub_mtime := 0
 var _scene_models := []      # .vox 场景里的全部子模型（武器零件要三个都拿到）
 var _scene_palette := []
 var _scene_mtime := 0
+var _weapon_volumes := {}      # 子模型序号 -> VoxVolume（缓存，见 weapon_volume()）
 var _bounds := AABB()
 var _bounds_ready := false
 var _body := AABB()
 var _body_ready := false
+var _collision := AABB()       # 碰撞盒（武器零件不含枪管，见 collision_bounds()）
+var _collision_ready := false
 
 
 static func from_text(text: String, path := "") -> PartDef:
@@ -253,6 +256,7 @@ func model_volume() -> VoxVolume:
 	_model_mtime = mtime
 	_bounds_ready = false  # 模型文件换了，包围盒要重算
 	_body_ready = false
+	_collision_ready = false
 	if _model_volume != null and model_offset != Vector3i.ZERO:
 		_model_volume = _shift_volume(_model_volume, model_offset + model_pad)
 	return _model_volume
@@ -296,6 +300,7 @@ func sub_model_volume() -> VoxVolume:
 	_sub_volume = result.get("volume")
 	_sub_mtime = mtime
 	_bounds_ready = false  # 子模型换了，碰撞箱要重算
+	_collision_ready = false
 	for warning in result.get("warnings", []):
 		_warn("子模型（%s）：%s" % [wheel_body.get_file(), str(warning)])
 	return _sub_volume
@@ -321,6 +326,7 @@ func scene_models() -> Array:
 		_scene_models = result.get("models", [])
 		_scene_palette = result.get("palette", [])
 		_scene_mtime = mtime
+		_weapon_volumes.clear()   # 模型换了：各子模型的体积缓存一起作废
 	return _scene_models
 
 
@@ -330,7 +336,12 @@ func weapon_volume(index: int) -> VoxVolume:
 	var models := scene_models()
 	if index < 0 or index >= models.size():
 		return null
-	return _scene_volume([models[index]])
+	# 缓存：`Turret.setup()` 每台机器要取好几次（转轴推导 + 网格），而每造一次要重画 48³
+	# （实测 1.4 ms/次）。武器多了这就是几十毫秒 ×N。换模型时 `scene_models()` 会重载，
+	# 那时一起清掉缓存（见下面的 `_scene_volumes.clear()`）。
+	if not _weapon_volumes.has(index):
+		_weapon_volumes[index] = _scene_volume([models[index]])
+	return _weapon_volumes[index]
 
 
 ## 本体体积：全部子模型并起来（武器的静态外观 = 底座 + 支架 + 枪管）。
@@ -618,9 +629,37 @@ func mesh_bounds() -> AABB:
 ## 基准格（锚点）用它算：锚点必须落在零件自己真的有体素的那一格上。
 func body_bounds() -> AABB:
 	if not _body_ready:
-		_body = _compute_mesh_bounds(build_volume())
+		if weapon != "":
+			# 武器零件：本体 = 全部子模型并起来 —— 直接用各子模型的**归一化盒子**合并（O(1)）。
+			# ⚠️ 别走"建一块 48³ 体积再逐体素扫边界"那条路：`tight_bounds()` 要从空的那一侧
+			# 一层层扫过去，实测单个零件就要 100~300 ms，武器一多进场就卡好几秒。
+			var merged := AABB()
+			var got_any := false
+			for index in scene_models().size():
+				var piece := weapon_sub_bounds(index)
+				if piece.size.x <= 0.0 or piece.size.y <= 0.0 or piece.size.z <= 0.0:
+					continue
+				merged = piece if not got_any else merged.merge(piece)
+				got_any = true
+			_body = merged if got_any else _compute_mesh_bounds(build_volume())
+		else:
+			_body = _compute_mesh_bounds(build_volume())
 		_body_ready = true
 	return _body
+
+
+## 第 `index` 个子模型在**零件本地**坐标里的包围盒（单位 = 格），O(1)。
+## `.vox` 场景里每个子模型已经给了"归一化 bbox（size）+ 场景偏移（offset）"（单位 = 体素），
+## 直接换算即可 —— 不用再去扫体积找边界。
+func weapon_sub_bounds(index: int) -> AABB:
+	var models := scene_models()
+	if index < 0 or index >= models.size():
+		return AABB()
+	var model: Dictionary = models[index]
+	var unit := float(VoxVolume.VOXELS_PER_CUBE)
+	var offset: Vector3i = model.get("offset", Vector3i.ZERO)
+	var size: Vector3i = model.get("size", Vector3i.ONE)
+	return AABB(Vector3(offset) / unit, Vector3(size) / unit)
 
 
 ## **碰撞盒**用的包围盒：武器零件**不含枪管**（只取底座 + 支架）—— 见下面那段说明。
@@ -636,18 +675,23 @@ func body_bounds() -> AABB:
 ## "跟着 Turret 的 Yaw/Pitch 一起转"的独立受击盒（像轮子的轮胎受击盒那样），
 ## 那是另一处改动，等有需要再说。
 func collision_bounds() -> AABB:
+	if _collision_ready:
+		return _collision
 	if weapon != "turret":
-		return body_bounds()
+		_collision = body_bounds()
+		_collision_ready = true
+		return _collision
 	var box := AABB()
 	var first := true
 	for index in [0, weapon_yaw_model]:
-		var volume := weapon_volume(index)
-		if volume == null or volume.solid_count() == 0:
+		var piece := weapon_sub_bounds(index)
+		if piece.size.x <= 0.0 or piece.size.y <= 0.0 or piece.size.z <= 0.0:
 			continue
-		var piece := tight_bounds(volume, Vector3.ZERO, Vector3(cubes))
 		box = piece if first else box.merge(piece)
 		first = false
-	return body_bounds() if first else box
+	_collision = body_bounds() if first else box
+	_collision_ready = true
+	return _collision
 
 
 ## 重心判定点：零件的**几何中心**（在本地空间，单位 = cube）。
