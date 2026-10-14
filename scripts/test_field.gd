@@ -1156,6 +1156,11 @@ func _update_hud() -> void:
 			angles.x,
 			angles.y,
 		]
+		# 想去的角（夹射界之后，单位 = 度）：和上面"实际角"并排看，
+		# 一眼能分辨是"夹错了"还是"解算/转速"的问题（用户报左转时回跳，就是靠这个看）。
+		_hud.text += "（想去 %.0f°/%.0f°）" % [
+			rad_to_deg(wrapf(turret.aim_yaw, -PI, PI)), rad_to_deg(turret.aim_pitch)
+		]
 		# 真实射界：和初始枪口朝向连通的那一片才算数（射界里允许有零件，但不能穿过去）
 		_hud.text += " · 射界 %.0f%%" % (turret.arc_free_ratio() * 100.0)
 		if not turret.arc_blocked_by.is_empty():

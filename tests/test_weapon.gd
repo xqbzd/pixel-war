@@ -508,6 +508,13 @@ func test_turret_clamp_keeps_pitch_free_when_yaw_is_blocked() -> void:
 	assert_almost_eq(
 		rad_to_deg(clamped.y), 25.0, 0.6, "★ 俯仰不该被水平连坐冻死（用户报的）"
 	)
+	# ★ 反过来（往左转、负角）必须**对称**：夹住之后只能停在 0 和 −60° 之间，
+	# 绝不能翻到对面（+60° 那一侧）去 —— 用户报的"往左被挡时会立刻跳到右侧被挡的位置"。
+	var left := turret._clamp_to_arc(-wanted_yaw, deg_to_rad(-5.0))
+	assert_true(
+		left.x <= 0.01 and left.x > -wanted_yaw - 0.01,
+		"往左夹只能落在 [−60°, 0] 里，不能翻到右边：%.1f°" % rad_to_deg(left.x)
+	)
 	turret.free()
 
 

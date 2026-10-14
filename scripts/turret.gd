@@ -59,6 +59,10 @@ var _pitch_axis := Vector3.RIGHT    # 俯仰轴（零件本地，垂直于枪管
 var _pitch_sign := 1.0              # 让"正的俯仰角 = 抬枪"的符号
 var _yaw := 0.0                     # 当前角度（弧度；调试/HUD 用）
 var _pitch := 0.0
+## 最近一次"夹射界之后"想去的目标角（弧度）：HUD 上和目标实际朝向一起显示，
+## 用来分辨"是夹射界夹错了"还是"解算/转速那边出的问题"（调遮挡时很有用）。
+var aim_yaw := 0.0
+var aim_pitch := 0.0
 var _cooldown := 0.0                # 开火冷却（秒）
 var _flash: MeshInstance3D          # 枪口闪光（挂在 Pitch 节点上，见 setup）
 var _flash_left := 0.0              # 闪光还剩多久
@@ -423,6 +427,8 @@ func update_aim(global_target: Vector3, delta: float) -> void:
 	var clamped := _clamp_to_arc(target_yaw, target_pitch)
 	target_yaw = clamped.x
 	target_pitch = clamped.y
+	aim_yaw = target_yaw
+	aim_pitch = target_pitch
 	if delta > 0.0:
 		# 目标角先折到"离当前角最近的那个等价角"：跨 ±180° 也走最短路径，不绕远
 		target_yaw = _yaw + wrapf(target_yaw - _yaw, -PI, PI)
