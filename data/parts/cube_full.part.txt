@@ -1,0 +1,21 @@
+# 立方体块 —— 载具上数量最多的那种部件
+#
+# 渲染路线 texture：每个 cube 单元 6 个面各 1 个四边形，贴 16x16 图集。
+# 图集不是手绘的，而是把同一份体素体积的外表面投影出来的，
+# 所以它和斜切部件的体素版本配色完全一致（浅灰主体 + 灰色棱）。
+
+name = 立方体块 / Cube Block
+
+shape     = cube        # cube | half_prism_xz | half_prism_xy | half_prism_yz
+cubes     = 1 1 1       # 部件占地（单位 = cube）；每个 cube = 16^3 体素
+render    = texture     # texture（六面贴图，适合数量巨大的方块）| voxel（体素网格）
+order     = 10          # 物品栏顺序（1 号位）
+
+body      = c9c9ce      # 浅灰主体
+edge      = 8e8e96      # 灰色棱
+edge_band = 1           # 棱的厚度，单位 = 体素（1/16 cube）
+
+# 基本数值（先按默认填，等手动调）
+weight    = 10           # 重量 kg
+hp        = 1000        # 血量
+pp        = 1           # 部件点数

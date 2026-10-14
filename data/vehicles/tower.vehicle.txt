@@ -1,0 +1,39 @@
+# 塔台 —— 又高又窄，用来测预览的自动取景（包围盒和另外两个差别很大）
+
+name = 塔台 / Tower
+
+# 底座 2 x 2
+part = cube_full 0 0 0 0
+part = cube_full 1 0 0 0
+part = cube_full 0 0 1 0
+part = cube_full 1 0 1 0
+
+# 柱身 2 x 2，4 层
+part = cube_full 0 1 0 0
+part = cube_full 1 1 0 0
+part = cube_full 0 1 1 0
+part = cube_full 1 1 1 0
+part = cube_full 0 2 0 0
+part = cube_full 1 2 0 0
+part = cube_full 0 2 1 0
+part = cube_full 1 2 1 0
+part = cube_full 0 3 0 0
+part = cube_full 1 3 0 0
+part = cube_full 0 3 1 0
+part = cube_full 1 3 1 0
+part = cube_full 0 4 0 0
+part = cube_full 1 4 0 0
+part = cube_full 0 4 1 0
+part = cube_full 1 4 1 0
+
+# 顶盖
+part = cube_full 0 5 0 0
+part = cube_full 1 5 0 0
+part = cube_full 0 5 1 0
+part = cube_full 1 5 1 0
+
+# 顶部倒角
+part = half_cube 0 6 0 0
+part = half_cube 1 6 0 0
+part = half_cube 0 6 1 0
+part = half_cube 1 6 1 0

@@ -1,0 +1,12 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# 导出的中间产物（Goxel 体素文本 + 图集 PNG）
+/exports/
+
+# 本地导出的可玩版本（分发给朋友用 Release，不进仓库）
+/build/
+
+# 编辑器插件的自动更新备份（5.8 MB 的 zip，纯开发用）
+addons/.godot_ai_update/

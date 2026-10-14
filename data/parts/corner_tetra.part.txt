@@ -1,0 +1,21 @@
+# 角四面体（1/6 立方体）—— 切掉立方体的一个角得到
+#
+# 判据 x + y + z <= 15：三个半格正方形面贴在角点所在的三个坐标面上，
+# 斜切出来的等边三角面不算连接面（拼不出平面）。
+# 只有 3 个连接点，默认连接点是正下方那个面。
+
+name = 角四面体 / Corner Tetrahedron
+
+shape     = corner_tetra
+cubes     = 1 1 1
+render    = voxel
+order     = 30          # 物品栏 3 号位
+
+body      = c9c9ce
+edge      = 8e8e96
+edge_band = 1
+
+# 基本数值（先按默认填，等手动调）
+weight    = 10
+hp        = 1000
+pp        = 1

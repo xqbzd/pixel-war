@@ -1,0 +1,20 @@
+# 切角块（5/6 立方体）—— 从完整立方体上切掉一个角，正好是角四面体的补块
+#
+# 六个面都还够大（切面那一侧露出 120 格），所以六个面全是连接点，
+# 默认连接点是正下方那个面。
+
+name = 切角块 / Corner-Cut Block
+
+shape     = corner_cut
+cubes     = 1 1 1
+render    = voxel
+order     = 40          # 物品栏 4 号位
+
+body      = c9c9ce
+edge      = 8e8e96
+edge_band = 1
+
+# 基本数值（先按默认填，等手动调）
+weight    = 10
+hp        = 1000
+pp        = 1

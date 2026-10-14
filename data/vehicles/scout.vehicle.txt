@@ -1,0 +1,26 @@
+# 侦查艇 —— 小、便宜、楔形车头
+#
+# 格式：part = <部件id> <x> <y> <z> <yaw 度>
+# x 向前，y 向上，z 向右；单位 = cube。
+
+name = 侦查艇 / Scout
+
+# 底盘：4 长 x 2 宽
+part = cube_full 0 0 0 0
+part = cube_full 1 0 0 0
+part = cube_full 2 0 0 0
+part = cube_full 3 0 0 0
+part = cube_full 0 0 1 0
+part = cube_full 1 0 1 0
+part = cube_full 2 0 1 0
+part = cube_full 3 0 1 0
+
+# 座舱
+part = cube_full 0 1 0 0
+part = cube_full 1 1 0 0
+part = cube_full 0 1 1 0
+part = cube_full 1 1 1 0
+
+# 楔形车头（斜面朝前上方）
+part = half_cube 4 0 0 0
+part = half_cube 4 0 1 0
