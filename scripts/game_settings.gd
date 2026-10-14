@@ -54,6 +54,7 @@ const HANDLING_DEFAULTS := {
 	"upright_damping": 0.6,    # 回正阻尼（相对临界阻尼，1.0 = 刚好不回摆）
 	"yaw_center_seconds": 0.35, # 松手回正：偏航角速度衰减的时间常数（秒），0 = 关掉
 	"ground_blend_seconds": 0.15, # 腾空↔落地的过渡时间（秒）：0 = 立刻切换
+	"angular_damp": 0.0,       # 车身角阻尼（1/秒）：把车身"转的震动本身"按比例衰减，0 = 关掉
 }
 static var _audio_values := {}    # path -> {key: value}
 static var _audio_mtime := {}     # path -> mtime（0 = 文件不存在）

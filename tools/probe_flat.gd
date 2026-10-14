@@ -8,6 +8,19 @@ extends SceneTree
 const VEHICLE_DIR := "res://data/vehicles"
 
 
+## 车身车头方向在**水平面**上的投影（车加速抬头时也不会变成零向量）
+static func _flat_forward(chassis: RigidBody3D) -> Vector3:
+	var up: Vector3 = chassis.global_transform.basis.y.normalized()
+	var raw: Vector3 = chassis.global_transform.basis.x
+	var flat := raw - up * raw.dot(up)
+	return flat.normalized() if flat.length() > 0.05 else raw.normalized()
+
+
+## 两个水平向量绕 `axis` 的有符号夹角（度，正 = 逆时针看下去）
+static func signed_angle(from: Vector3, to: Vector3, axis: Vector3) -> float:
+	return atan2(from.cross(to).dot(axis), from.dot(to))
+
+
 func _initialize() -> void:
 ## 第二个参数写 `arena` = **保留城镇场地和靶子、用游戏自己的出生点**（和进游戏一模一样）；
 ## 不写 = 拆掉场地、铺一块纯平地板（排除地形/出生点干扰）。
@@ -19,6 +32,7 @@ func _initialize() -> void:
 	var keep_arena := args.size() > 1 and str(args[1]) == "arena"
 	var trace := args.size() > 1 and str(args[1]) == "trace"
 	var drive_test := args.size() > 1 and str(args[1]) == "drive"
+	var turn_test := args.size() > 1 and str(args[1]) == "turn"
 	var TestField := load("res://scripts/test_field.gd")
 	TestField.pending_vehicle = {}
 	var field: Node = (load("res://scenes/test_field.tscn") as PackedScene).instantiate()
@@ -75,6 +89,42 @@ func _initialize() -> void:
 				chassis.linear_velocity.y, chassis.angular_velocity.length(),
 				" ".join(cols),
 			])
+		quit()
+		return
+	if turn_test:
+		# 转向台架：全油门 1 秒 → 再按住左方向键 8 秒。看**航向角**（相对出发朝向，度）和
+		# 偏航角速度 —— 用来判断"角阻尼会不会把车拧不动"。
+		print("--- 转向（全油门 → 1 秒后按住左转）每 0.5 秒一行 ---")
+		print("t      车速   航向角°  偏航w    倾角   着地")
+		Input.action_press("drive_forward")
+		var up0 := Vector3.UP
+		var origin_fwd := Vector3.ZERO
+		for step in range(20):
+			if step == 2:
+				origin_fwd = _flat_forward(chassis)
+			if step == 4:
+				Input.action_press("drive_left")
+			for _i in range(60):
+				await physics_frame
+			var fwd_now := _flat_forward(chassis)
+			var heading := 0.0
+			if origin_fwd != Vector3.ZERO:
+				heading = rad_to_deg(signed_angle(origin_fwd, fwd_now, up0))
+			var upv: Vector3 = chassis.global_transform.basis.y.normalized()
+			var contact := 0
+			for w in wheels:
+				if bool((w as Dictionary).get("contact", false)):
+					contact += 1
+			print("%5.1f  %6.2f  %7.1f  %+7.2f  %5.1f°  %d/%d" % [
+				float(step) * 0.5,
+				chassis.linear_velocity.length() * PartDef.CUBE_METERS,
+				heading,
+				chassis.angular_velocity.dot(up0),
+				rad_to_deg(acos(clampf(upv.y, -1.0, 1.0))),
+				contact, wheels.size(),
+			])
+		Input.action_release("drive_forward")
+		Input.action_release("drive_left")
 		quit()
 		return
 	if drive_test:

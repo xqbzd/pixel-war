@@ -164,6 +164,7 @@ func test_handling_table() -> void:
 	assert_true(float(values["downforce"]) >= 0.0, "下压力系数不能是负数")
 	assert_true(float(values["upright_torque"]) >= 0.0, "回正力矩不能是负数")
 	assert_true(float(values["upright_damping"]) >= 0.0, "回正阻尼不能是负数")
+	assert_true(float(values["angular_damp"]) >= 0.0, "车身角阻尼不能是负数")
 	# 解析规则：临时文件里塞注释、行尾注释、歪行、不认识的键、非数字
 	var path := "user://tmp_handling.txt"
 	var file := FileAccess.open(path, FileAccess.WRITE)

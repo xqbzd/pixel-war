@@ -1417,6 +1417,15 @@ func _apply_handling_aids(veh: Dictionary, chassis: RigidBody3D, steer: float, d
 			yaw_center_torque(up_now, chassis.angular_velocity, center_seconds, i_up)
 				* blend
 		)
+	# ④ 车身角阻尼：把车身"转的震动本身"整体系数化衰减（滚转/俯仰/偏航三个轴一起）。
+	#    单位是 **1/秒**：角速度按 1/(1 + 系数 × dt) 衰减，时间常数 ≈ 1/系数 秒
+	#      （0.5 → 2 秒衰减到 37%；3 → 0.33 秒；10 → 0.1 秒，基本"转不动"）。0 = 关掉。
+	#    ⚠️ 这里直接按比例缩放角速度，**不是**加一个 -c·ω 的力矩：那种显式力矩的稳定条件是
+	#      `c·dt/I < 2`，我们的转动惯量不大（几百 kg·格²），系数稍大就自激 —— 这个形式
+	#      无条件稳定，和 Godot 自带 `angular_damp` 是同一个算法，你随便往大调都安全。
+	var ang_damp := GameSettings.handling_value("angular_damp")
+	if ang_damp > 0.0:
+		chassis.angular_velocity /= 1.0 + ang_damp * delta * blend
 
 
 ## 手感辅助的"生效强度"：**有轮着地 → 目标 1，一个都没着地 → 目标 0**（不看轮数比例），
