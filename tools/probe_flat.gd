@@ -9,41 +9,47 @@ const VEHICLE_DIR := "res://data/vehicles"
 
 
 func _initialize() -> void:
+## 第二个参数写 `arena` = **保留城镇场地和靶子、用游戏自己的出生点**（和进游戏一模一样）；
+## 不写 = 拆掉场地、铺一块纯平地板（排除地形/出生点干扰）。
+##   godot --headless --path . --script res://tools/probe_flat.gd -- custom_2 arena
 	var car := "custom_2"
 	var args := OS.get_cmdline_user_args()
 	if args.size() > 0:
 		car = str(args[0])
+	var keep_arena := args.size() > 1 and str(args[1]) == "arena"
 	var TestField := load("res://scripts/test_field.gd")
 	TestField.pending_vehicle = {}
 	var field: Node = (load("res://scenes/test_field.tscn") as PackedScene).instantiate()
 	root.add_child(field)
 	await process_frame
-	# 拆掉城镇模型，铺一块 400×400 的平板（顶面 y = 0）
+	# 拆掉城镇模型，铺一块 400×400 的平板（顶面 y = 0）；`arena` 模式则原样保留
 	var arena: Node = field.get("_arena_root")
-	if arena != null:
+	if not keep_arena and arena != null:
 		field.remove_child(arena)
 		arena.queue_free()
-	field.set("_arena_model", null)
-	var floor_body := StaticBody3D.new()
-	floor_body.collision_layer = 1
-	var fshape := CollisionShape3D.new()
-	var fbox := BoxShape3D.new()
-	fbox.size = Vector3(400.0, 4.0, 400.0)
-	fshape.shape = fbox
-	fshape.position = Vector3(0.0, -2.0, 0.0)
-	floor_body.add_child(fshape)
-	field.add_child(floor_body)
+		field.set("_arena_model", null)
+	if not keep_arena:
+		var floor_body := StaticBody3D.new()
+		floor_body.collision_layer = 1
+		var fshape := CollisionShape3D.new()
+		var fbox := BoxShape3D.new()
+		fbox.size = Vector3(400.0, 4.0, 400.0)
+		fshape.shape = fbox
+		fshape.position = Vector3(0.0, -2.0, 0.0)
+		floor_body.add_child(fshape)
+		field.add_child(floor_body)
 	if not bool(field.call("enter_vehicle", car)):
 		print("进不了车：%s" % str(field.get("_status")))
 		quit()
 		return
 	var chassis: RigidBody3D = field.get("_chassis")
 	var rig: VehicleRig = field.get("_player_rig")
-	var box: AABB = rig.geometry_bounds_local()
-	chassis.global_position = Vector3(0.0, 0.2 - box.position.y, 0.0)
-	chassis.global_rotation = Vector3.ZERO
-	chassis.linear_velocity = Vector3.ZERO
-	chassis.angular_velocity = Vector3.ZERO
+	if not keep_arena:
+		var box: AABB = rig.geometry_bounds_local()
+		chassis.global_position = Vector3(0.0, 0.2 - box.position.y, 0.0)
+		chassis.global_rotation = Vector3.ZERO
+		chassis.linear_velocity = Vector3.ZERO
+		chassis.angular_velocity = Vector3.ZERO
 	var wheels: Array = field.get("_wheels")
 	print("=== %s：质量 %.0f kg，%d 个轮子 ===" % [car, chassis.mass, wheels.size()])
 	print("t      y       速度      角速度    倾角    着地")

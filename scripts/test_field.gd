@@ -22,7 +22,11 @@ class_name TestField
 const MENU_SCENE := "res://scenes/main_menu.tscn"
 const VEHICLE_DIR := "res://data/vehicles"
 const GameSettings := preload("res://scripts/game_settings.gd")
-const SPAWN_HEIGHT := 2.5     # 出生高度：掉下来落地
+## 出生高度（格）：车底离地这么多，**轻轻落下**。
+## ⚠️ 别写大：2.5 格 = 1.25 米，轻车（比如 230 kg 那台）落地时会**砸**下来 ——
+## 悬挂行程只有 1.2 格，吸收不了这个落差，车会一直弹（用户报的"进测试场过几秒疯狂抖"）。
+## 0.3 格 = 6 厘米，够让悬挂自己就位，又不会砸。
+const SPAWN_HEIGHT := 0.3
 ## 场地：一整块现成模型（Truck Town，MIT）。1 模型单位 ≈ 1 米左右（房子 6~10 单位高）。
 ## 想改倍数：进游戏按 `[` / `]` 现场调（HUD 显示当前倍数），定了告诉我我改这个默认值。
 const ARENA_SCENE := "res://assets/arena/truck_town/town_model.gltf"
