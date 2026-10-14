@@ -115,6 +115,14 @@ var wheel_support_multiple := 0.0
 ## 而且**不改相位**（低通滤波会加滞后、把支撑回路推成自激振荡 —— 试过，连两吨的车都抖）。
 ## 静止时单轮只有"车重 ÷ 轮数"，离上限很远，所以只有尖峰被削。
 var wheel_peak_force_car_weights := 1.0
+## ── 轮胎力模型（移植自 nani_raycast_wheel.gd，MIT，见 reference/nani_raycast_wheel/）──
+## 抓地倍率：轮胎力整体乘这个（1.0 = 原始）。想整体更粘/更滑就调它。
+var wheel_grip_factor := 1.0
+## 侧向 / 纵向 **Pacejka 四系数** `peak stiff curve shape`（照搬它的 1,10,0,1.35 / 1,10,0,1.65）。
+## 公式：`力 = 法向载荷 × peak × sin(shape·atan(stiff·s − curve·(stiff·s − atan(stiff·s))))`
+## 小滑移时侧偏刚度 ≈ 载荷 × peak × stiff × shape，大滑移自动饱和（不会把车掀翻）。
+var wheel_lat_pacejka := [1.0, 10.0, 0.0, 1.35]
+var wheel_long_pacejka := [1.0, 10.0, 0.0, 1.65]
 ## 阻尼系数 N·秒/格：压缩（往下压）和回弹（伸出去）可以不一样。
 ## 参考值（想要"刚好不振荡"）：临界阻尼 c = 2 × √(刚度 × 单轮质量)，
 ## 取它的 0.4~0.7 倍比较舒服；比临界大 = 发闷，小了 = 过坎会弹几下。
@@ -1078,6 +1086,20 @@ func _apply(key: String, value: String, line_no: int) -> void:
 			wheel_peak_force_car_weights = _parse_float(
 				value, wheel_peak_force_car_weights, line_no, key, 0.0
 			)
+		"wheel_grip_factor":
+			wheel_grip_factor = _parse_float(value, wheel_grip_factor, line_no, key, 0.0)
+		"wheel_lat_pacejka":
+			var nums := _parse_floats(value)
+			if nums.size() == 4:
+				wheel_lat_pacejka = nums
+			else:
+				_warn("第 %d 行：wheel_lat_pacejka 需要 4 个数 peak stiff curve shape" % line_no)
+		"wheel_long_pacejka":
+			var nums := _parse_floats(value)
+			if nums.size() == 4:
+				wheel_long_pacejka = nums
+			else:
+				_warn("第 %d 行：wheel_long_pacejka 需要 4 个数 peak stiff curve shape" % line_no)
 		"wheel_suspension_max_force":
 			wheel_suspension_max_force = _parse_float(
 				value, wheel_suspension_max_force, line_no, key, 0.0

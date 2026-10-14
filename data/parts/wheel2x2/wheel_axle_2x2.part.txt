@@ -138,4 +138,11 @@ wheel_anti_roll_damping   = 0.55
 #   射线式悬挂在临界高度上会给出"一帧满力"的尖峰，截断能削掉它而且**不改相位**
 #   （低通滤波会加滞后、把支撑回路推成自激，连两吨的车都抖 —— 试过，别用）。
 #   静止时单轮只有"车重 ÷ 轮数"，离上限很远，所以只削尖峰、不影响手感。
-wheel_peak_force_car_weights = 1
+wheel_peak_force_car_weights = 2
+# ── 轮胎力模型（Pacejka，移植自 nani_raycast_wheel.gd，MIT，见 reference/ 目录）──
+#   轮胎力 = 法向载荷 × peak × sin(shape·atan(stiff·滑移 − curve·(stiff·滑移 − atan(stiff·滑移))))
+#   小滑移时 ≈ 载荷 × peak × stiff × shape（侧偏刚度），大滑移自动饱和（不会把车掀翻）。
+#   下面三个键的默认值就是原作者那份，先按原样跑。
+wheel_grip_factor          = 1              # 抓地总倍率：>1 更粘地，<1 更滑
+wheel_lat_pacejka          = 1 10 0 1.35    # 侧向四系数：peak stiff curve shape
+wheel_long_pacejka         = 1 10 0 1.65    # 纵向四系数：peak stiff curve shape
