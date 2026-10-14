@@ -85,10 +85,12 @@ const REVERSE_BRAKE_SPEED_CUBES := 0.6
 ## 用刹车那套增益把残余速度按平（不然静止的车会被支撑力的横向分量慢慢推走 ——
 ## 实测 0.1 格/秒²，小车滑到轮子射线的临界点就会被弹飞）。
 const STOP_GRIP_SPEED := 1.0
-## 悬挂支撑力的**单帧冲量上限**（格/秒）：每个轮子一帧最多把车身竖直速度改变这么多。
-## 1.5 格/秒 ≈ 4.5 g 的一帧冲击（真正的硬着陆级别），再大的跳变都按这个削平 ——
-## 射线式悬挂在临界高度上会给出"突然满力"，没有这道闸小车就会被一帧发射。
-const SUSP_MAX_DV := 1.5
+## 悬挂支撑力的**低通滤波时间常数**（秒）：`push` 每帧朝目标值走
+## `1 - exp(-delta / 这个数)` 的比例 —— 稳态力（顶住车重那一份）保持精确，
+## 但"射线在临界高度上突然够到地面"造成的**一帧跳变**会被摊平成几帧。
+## 这是替代"按车重自适应悬挂"的方案（用户 2026-10-14 定的）：零件参数回到固有绝对值，
+## 稳定性由这个滤波器负责。0 = 关掉滤波（回到"一帧满力"的老行为）。
+const SUSP_FORCE_FILTER_SECONDS := 0.03
 ## 轮胎**视觉**转速（和物理无关，纯给玩家看的）：
 ##   - 不跟 `VehicleWheel3D.get_rpm()` 走 —— 滑行时它恒为 0、给油时又乱跳（"看着像随机乱转"）；
 ##   - 自己按"地面速度 / 半径"算滚动，再在**这个轮子正在输出**时叠加一个指示转速，
@@ -784,7 +786,9 @@ func _add_wheel(veh: Dictionary, spec: Dictionary, wheel_count: int) -> void:
 		"rest": rest,
 		"travel": travel,
 		"max_force": max_force,
-		"wheel_mass": wheel_load / maxf(0.001, _world_gravity()),
+		# 簧上质量（单轮）：隐式阻尼要用它把"这一帧能改变多少速度"算出来（见 _apply_wheel）。
+		# 这是**数值**参数，不是手感参数 —— 不需要按车重手动调。
+		"wheel_mass": maxf(1.0, mass / float(count)),
 		"damp_compression": damp_c,   # 阻尼系数（N·秒/格，直接值）
 		"damp_relaxation": damp_r,
 		"mu": mu,                     # 库仑摩擦系数
@@ -1847,17 +1851,29 @@ func _apply_wheel(veh: Dictionary, entry: Dictionary, delta: float) -> void:
 			float(entry["damp_compression"]) if rate > 0.0
 			else float(entry["damp_relaxation"])
 		)
-		# ★ **单帧冲量上限**（这一条是"仿 Godot 单射线轮"的关键）：悬挂力再大，也不许在一帧里
-		# 把车身竖直速度改变超过 `SUSP_MAX_DV`。射线在临界高度上"突然够到地面"时，
-		# 测到的距离会跳变 → 弹簧/阻尼一帧拉出十几倍轮重的力 → 重车压得住、230 kg 的小车被发射
-		# （实测一帧速度 0.13 → 2.6 格/秒 ≈ 21 g，然后翻车）。
-		# ⚠️ 早先试过"限制压缩量的变化率"—— 那等于**造出假速度**（阻尼项读到 5 格/秒，力反而更大），
-		# 所以限制要下在**力/冲量**上，不能下在几何量上。
-		var push := clampf(
-			stiffness * compression + damp * rate,
-			0.0,
-			minf(float(entry["max_force"]), float(entry["wheel_mass"]) * SUSP_MAX_DV / delta)
+		# ★ **隐式阻尼**（Godot / Bullet 那套稳定形式，用户 2026-10-14 定）：
+		# 阻尼项用"这一帧更新**之后**的速度"算，而不是当前速度 —— 于是**无条件稳定**，
+		# 不需要按车重调参数。
+		#   为什么要这样：显式阻尼（`k·x + c·v`）的稳定条件是 `dt < 2m/c`，
+		#   而 c 是零件里的绝对值（20000 N·秒/格）：2 吨的车 m 大、没事；
+		#   230 kg 的小车 m 只有 57 kg → 2m/c = 0.0058 秒 < dt(1/120) → **数值不稳定** →
+		#   阻尼力帧间反向、越算越大 → 顶到 `max_force` 把车发射（实测一帧 0.13 → 2.6 格/秒）。
+		#   隐式形式的推法：`v' = (v + (k·x/m)·dt) / (1 + (c/m)·dt)`，
+		#   力学上等价于 `F = k·x − c·v'`（阻尼吃新速度），施加的力取 `m·(v'−v)/dt`。
+		var wheel_mass := maxf(1.0, float(entry["wheel_mass"]))
+		# ⚠️ 弹簧项是**负号**：压缩量越大越要"把车身往上推"（沿 down 方向减速），
+		# 写成正号等于继续往下压 —— 会直接把车按进地里再弹飞（实测两台车 y 冲到 25/10）。
+		var v_new := (rate - (stiffness * compression / wheel_mass) * delta) / (
+			1.0 + (damp / wheel_mass) * delta
 		)
+		var wanted := clampf(
+			wheel_mass * (rate - v_new) / delta, 0.0, float(entry["max_force"])
+		)
+		var blend := 1.0
+		if SUSP_FORCE_FILTER_SECONDS > 0.0:
+			blend = 1.0 - exp(-delta / SUSP_FORCE_FILTER_SECONDS)
+		var push := lerpf(float(entry.get("push", wanted)), wanted, blend)
+		entry["push"] = push
 		_apply_tire_force(
 			chassis, entry, ground_point, -down, push, velocity, mu, drive_in, braking, brake_gain
 		)

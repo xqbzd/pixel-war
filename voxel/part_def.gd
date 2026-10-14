@@ -551,27 +551,30 @@ func fire_interval_seconds() -> float:
 	return 60.0 / weapon_rpm
 
 
-## 按**这台车的重量**把悬挂参数解出来：{stiffness, damper_c, damper_r, max_force}。
-## `wheel_load` = 这个轮子承担的静态重量（N），`wheel_mass` = 对应的质量（kg）。
-## 车重变了（零件被打掉）就再算一次。`wheel_ride_sag <= 0` 时退回旧的绝对值。
-func resolved_suspension(wheel_load: float, wheel_mass: float) -> Dictionary:
-	if wheel_ride_sag <= 0.0:
-		return {
-			"stiffness": wheel_stiffness,
-			"damper_c": wheel_damper_compression,
-			"damper_r": wheel_damper_relaxation,
-			"max_force": wheel_suspension_max_force,
-		}
-	var stiffness := maxf(1.0, wheel_load / maxf(0.001, wheel_ride_sag))
-	# 临界阻尼 c = 2√(k·m)；乘上用户写的比例（< 1 会回弹一下，> 1 更闷）
-	var critical := 2.0 * sqrt(stiffness * maxf(0.001, wheel_mass))
-	var ratio := maxf(0.0, wheel_damper_ratio)
+## 悬挂参数：**零件固有（绝对值）** —— `wheel_stiffness`（N/格）、
+## `wheel_damper_compression/relaxation`（N·秒/格）、`wheel_suspension_max_force`（N）。
+##
+## 2026-10-14 试过一版"按车重自动算"（`wheel_ride_sag` / `wheel_damper_ratio` /
+## `wheel_support_multiple`）：比值确实能自适应，但**轻车被弹飞的根因不在比值**，
+## 而在"射线式悬挂会在临界高度上给出**一帧跳变**的力" —— 那个问题改用**低通滤波**
+## 解决（见 `TestField` 的 `SUSP_FORCE_FILTER_SECONDS`），所以这里回到零件固有参数。
+## （上面三个相对量还留在解析表里，但不参与计算；老文件写了也不会报错。）
+func resolved_suspension(_wheel_load: float, _wheel_mass: float) -> Dictionary:
+	# ⚠️ 只有**上限**跟车重走（安全阀），刚度/阻尼仍然是零件固有值：
+	# 实测（tools/probe_flat.gd，230 kg 的车）—— 把 `wheel_suspension_max_force` 当绝对值用
+	# 时，它是该车单轮静态负载的 **66 倍**，落地后**稳态**就在给这么大的力，小车直接飞，
+	# 低通滤波也无能为力（滤波只削尖峰，不动稳态）。所以：
+	#   * `wheel_stiffness` / `wheel_damper_*`：绝对值，**你调的手感，不动**；
+	#   * `wheel_support_multiple > 0`：上限 = 该轮静态负载 × 它（推荐 4）；
+	#   * 不写（=0）：退回 `wheel_suspension_max_force` 绝对值（老部件文件照旧）。
+	var max_force := wheel_suspension_max_force
+	if wheel_support_multiple > 0.0:
+		max_force = minf(max_force, _wheel_load * wheel_support_multiple)
 	return {
-		"stiffness": stiffness,
-		"damper_c": critical * ratio,
-		"damper_r": critical * ratio,
-		# 上限跟着车重走：轻车不会被"几十倍车重"的支撑力弹飞
-		"max_force": wheel_load * maxf(1.0, wheel_support_multiple),
+		"stiffness": wheel_stiffness,
+		"damper_c": wheel_damper_compression,
+		"damper_r": wheel_damper_relaxation,
+		"max_force": max_force,
 	}
 
 
