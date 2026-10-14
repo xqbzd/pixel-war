@@ -422,16 +422,20 @@ func update_aim(global_target: Vector3, delta: float) -> void:
 	var solved := solve_aim(to_target, _barrel_dir, yaw_limit_deg, pitch_min_deg, pitch_max_deg)
 	var target_yaw: float = solved["yaw"]
 	var target_pitch: float = solved["pitch"]
+	# ⚠️ 先把目标折到"离当前角最近的那个等价角"（跨 ±180° 也走最短路径），**必须在夹射界之前**：
+	# `_yaw` 是一直累加的（可能已经转到 ±200° 这种范围外），而 `solve_aim()` 给的是 (-180, 180]。
+	# 原来把归一化放在夹取之后 → `_clamp_to_arc()` 拿"没归一化的目标"和范围外的当前角做线性插值，
+	# 往**反方向**走，表现为"想去 −135° 突然跳到 +153°，枪掉头"（用户报的）。
 	# 真实射界：目标够不着就夹到"沿连通域能走到的最远处"（枪管不会穿过零件，
 	# 但可以贴着障碍滑动）。射界没算过时原样返回。
+	if delta > 0.0:
+		target_yaw = _yaw + wrapf(target_yaw - _yaw, -PI, PI)
 	var clamped := _clamp_to_arc(target_yaw, target_pitch)
 	target_yaw = clamped.x
 	target_pitch = clamped.y
 	aim_yaw = target_yaw
 	aim_pitch = target_pitch
 	if delta > 0.0:
-		# 目标角先折到"离当前角最近的那个等价角"：跨 ±180° 也走最短路径，不绕远
-		target_yaw = _yaw + wrapf(target_yaw - _yaw, -PI, PI)
 		var step := deg_to_rad(traverse_speed_deg) * delta
 		_yaw = move_toward(_yaw, target_yaw, step)
 		_pitch = move_toward(_pitch, target_pitch, step)

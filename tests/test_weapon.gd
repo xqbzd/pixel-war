@@ -484,6 +484,32 @@ func test_weapon_collision_box_excludes_the_sweeping_barrel() -> void:
 		assert_eq(cube.collision_bounds(), cube.body_bounds(), "普通零件的碰撞盒不变")
 
 
+## 跨 ±180° 的目标角：**先**折到"离当前角最近的那个等价角"，再夹射界。
+## 用户报的 bug：`_yaw` 已经累加到 −200°（unwrap 状态），而 `solve_aim()` 给的是 +153°
+## （同一个方向，等价于 −207°）—— 归一化放在夹取之后时，线性插值会朝**反方向**走，
+## 枪就"掉头"了（"想去从 −135° 跳到 +153°，方向反转"）。
+func test_turret_aim_wrap_does_not_reverse_direction() -> void:
+	var library := _library()
+	var def: PartDef = library.get_def(MG_ID)
+	if def == null:
+		return
+	var turret := Turret.new()
+	assert_eq(turret.setup(def, Transform3D(Basis(), Vector3.ZERO), library), "", "转塔能装起来")
+	turret.set_meta("part_index", 7)
+	turret.rebuild_arc([])                  # 不放障碍：这一条只验"归一化"
+	turret._yaw = deg_to_rad(-200.0)        # 已经绕着转过去 20°（超出 ±180）
+	turret._pitch = 0.0
+	var aim_dir := Basis(Vector3.UP, deg_to_rad(153.0)) * Vector3(0.0, 0.0, 1.0)
+	var target: Vector3 = def.weapon_pivot()["pivot"] + aim_dir * 50.0
+	turret.update_aim(target, 1.0 / 60.0)
+	assert_true(
+		rad_to_deg(turret._yaw) < -200.0,
+		"★ 该继续往负方向走（−200° → −207°），不能翻回 +153°：现在 %.1f°"
+			% rad_to_deg(turret._yaw)
+	)
+	turret.free()
+
+
 ## 被水平挡住的枪**不能连俯仰一起冻死**（用户报的："被左右障碍挡住时上下也锁死"）。
 ## `_clamp_to_arc()` 现在两个轴分别夹：保持当前俯仰先把水平走到头，再在那个水平角上走俯仰。
 func test_turret_clamp_keeps_pitch_free_when_yaw_is_blocked() -> void:
