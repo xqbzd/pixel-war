@@ -7,7 +7,9 @@ extends Node3D
 ##
 ## 弹道只受重力（`Ballistics.advance()`）：出膛速度来自部件文件（真实 m/s）换算成格/秒。
 ## 命中判定：
-##   * 打到**自己的车体**（`own_rid`）→ 子弹**直接消失**，不造成伤害、不留任何效果##     （用户定的规则：抛物线和散射让子弹有机会绕回来打到自己）；
+##   * 打到**自己的车体**（`own_rid`）→ 子弹**直接消失**、**不造成伤害**（`hit` 不发），
+##     但会放一个命中小爆炸 —— 用户 2026-10-14 改的：抛物线和散射让子弹有机会绕回来
+##     打到自己，要看得见它打在自己哪儿（调枪口 / 射界 / 贴脸自吃时全靠它）；
 ##   * 打到别的碰撞体 → 记一发命中（伤害现在还没有接收方）、放一个小的命中火花。
 ##
 ## 视觉：每个弹丸是一个沿速度方向拉长的小方块（曳光弹），长度随速度变；
@@ -43,7 +45,7 @@ const IMPACT_PEAK := 2.6
 
 var gravity := PartDef.GRAVITY_CUBES  # 世界重力（格/秒²），测试场按 project.godot 传进来
 var layers := 1            # 子弹能打到哪些碰撞层
-## 开火者键 -> 其车体的 RID：子弹打回**自己的车**时直接"吃掉"（不造成伤害、不留效果）。
+## 开火者键 -> 其车体的 RID：子弹打回**自己的车**时直接"吃掉"（不造成伤害，但会放命中小爆炸）。
 ## 每个键可以是一台车（玩家/某个靶子），以后敌人开火也是往这里加一条。
 var owner_rids := {}
 
@@ -92,17 +94,18 @@ func step(delta: float, space: PhysicsDirectSpaceState3D) -> void:
 			_spawn_tracer_ghost(bullet["node"], hit_result["position"])
 			_bullets.remove_at(index)   # 节点交给"幽灵"列表，不走 _retire（那个会立刻隐藏）
 			index -= 1
-			# 打到自己车体：吃掉（没伤害、没效果）—— 这是用户要求的规则
 			var collider: Object = hit_result.get("collider")
 			var hit_rid := RID()
 			if collider is CollisionObject3D:
 				hit_rid = (collider as CollisionObject3D).get_rid()
-			var own: Variant = owner_rids.get(str(bullet.get("owner", "")))
-			if own != null and hit_rid == own:
+			# 处置见 `hit_plan()`：打到自己 = **只放特效、不结算伤害**（用户 2026-10-14 的要求）
+			var plan := hit_plan(owner_rids, str(bullet.get("owner", "")), hit_rid)
+			if bool(plan["impact"]):
+				_spawn_impact(hit_result["position"])
+			if bool(plan["self"]):
 				_eaten += 1
 			else:
 				_hits += 1
-				_spawn_impact(hit_result["position"])
 				hit.emit(
 					hit_rid,
 					int(hit_result.get("shape", -1)),
@@ -273,6 +276,24 @@ func _make_tracer() -> MeshInstance3D:
 	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(node)
 	return node
+
+
+## 命中时的处置（纯函数，测试直接打它）：`owner_rows` = `owner_rids`，
+## `owner_key` = 这一发是谁打的，`hit_rid` = 打中的物理体。
+## 返回 {self, impact, damage}：
+##   * 打到自己车体（`self`）→ **impact = true, damage = false** ——
+##     用户 2026-10-14 的要求：不造成伤害，但**要放命中小爆炸**（看得见这一发打在自己哪儿，
+##     调枪口 / 射界 / 贴脸自吃时全靠它）；
+##   * 打到别人（或有登记的 owner 都没匹配上）→ damage = true（走 `hit` 信号结算）。
+static func hit_plan(owner_rows: Dictionary, owner_key: String, hit_rid: RID) -> Dictionary:
+	var own: Variant = owner_rows.get(owner_key)
+	var is_self: bool = own != null and hit_rid == own
+	return {"self": is_self, "impact": true, "damage": not is_self}
+
+
+## 在某个位置放一个命中小爆炸（玩家贴脸自吃时，测试场要指定放哪儿，所以做成公开的）。
+func spawn_impact(at: Vector3) -> void:
+	_spawn_impact(at)
 
 
 func _spawn_impact(at: Vector3) -> void:

@@ -1514,6 +1514,28 @@ func _update_turrets(delta: float) -> void:
 		_aim_marker.global_position = _aim_point
 
 
+## 枪口 → 子弹生成点那一段里，**第一个**被自家零件挡住的地方（世界坐标）。
+## "枪口贴脸自吃"时把命中小爆炸放在这儿 —— 弹丸压根没生成，得靠这个特效才看得见打在哪儿。
+## 这一段只有 1 格，采 8 个点足够；一个都没采到就退回起点。
+func _first_blocked_point(from: Vector3, to: Vector3, skip_index: int) -> Vector3:
+	if _chassis == null:
+		return from
+	var to_local := _chassis.global_transform.affine_inverse()
+	var a := to_local * from
+	var b := to_local * to
+	for i in range(1, 9):
+		var point := a.lerp(b, float(i) / 8.0)
+		for j in _clip_boxes.size():
+			if j == skip_index:
+				continue
+			var box: AABB = _clip_boxes[j]["box"]
+			if box.size.x <= 0.001 or box.size.y <= 0.001 or box.size.z <= 0.001:
+				continue
+			if box.has_point(point):
+				return _chassis.global_transform * point
+	return from
+
+
 ## 转塔自检要用的"每个零件的包围盒"（底盘本地坐标，下标 = 零件下标）。
 ## 直接用 VehicleRig 已经建好的碰撞盒：它就是"这个零件占的那块地方"，
 ## 和受击/毁伤用的是同一份口径。名字里带上部件 id，HUD 里能直接看出"被谁挡住"。
@@ -1585,6 +1607,13 @@ func _update_weapons(delta: float) -> void:
 				# 打在自己身上：不生成弹丸（弹丸的射线是从生成点开始的，跨过的那 1 格它永远看不到）
 				_muzzle_eaten += 1
 				_last_hit = "枪口被 %s 挡住，这一发打在自己身上" % slam
+				# 照样给个命中小爆炸（用户要看得见），位置取那 1 格里**第一个被挡住的地方**
+				if _projectiles != null:
+					_projectiles.spawn_impact(
+						_first_blocked_point(
+							muzzle_now, spawn, int(turret.get_meta("part_index", -1))
+						)
+					)
 				continue
 			_projectiles.fire(
 				spawn,

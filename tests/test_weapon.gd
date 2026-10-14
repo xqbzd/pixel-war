@@ -578,6 +578,53 @@ func test_impact_expands_then_recycles() -> void:
 	shots.free()
 
 
+## 命中的处置（`Projectiles.hit_plan()`）：打到自己车体是**只放特效、不结算伤害**。
+## 用户 2026-10-14 的要求：抛物线和散射让子弹有机会绕回来打到自己，
+## 调枪口 / 射界 / 贴脸自吃的时候得**看得见**这一发打在自己哪儿。
+##
+## （为什么测这个纯函数而不是跑一发真的：`step()` 那条路要真实的物理空间查询，
+##   而测试跑在编辑器进程里、根窗口没有 3D world —— 拿不到 `direct_space_state`。）
+func test_self_hit_is_effect_only() -> void:
+	var mine_body := StaticBody3D.new()
+	var other_body := StaticBody3D.new()
+	var rows := {"player": mine_body.get_rid()}
+	var self_plan := Projectiles.hit_plan(rows, "player", mine_body.get_rid())
+	assert_true(bool(self_plan["self"]), "打到自己要认出来")
+	assert_true(bool(self_plan["impact"]), "★ 打到自己也要放命中小爆炸（看得见打在哪）")
+	assert_false(bool(self_plan["damage"]), "但绝不能结算伤害")
+	var other_plan := Projectiles.hit_plan(rows, "player", other_body.get_rid())
+	assert_false(bool(other_plan["self"]), "打到别人不算自己")
+	assert_true(bool(other_plan["damage"]), "打到别人要结算伤害")
+	assert_true(
+		bool(Projectiles.hit_plan(rows, "敌方", mine_body.get_rid())["damage"]),
+		"没在 owner_rids 里登记的开火者，一律按别人算"
+	)
+	mine_body.free()
+	other_body.free()
+
+
+## "枪口贴脸自吃"要把命中小爆炸放在**第一个被挡住的地方**（弹丸压根没生成，
+## 全靠这个特效才看得见打在哪 —— 用户 2026-10-14 要的）。
+func test_muzzle_self_hit_supplies_an_impact_point() -> void:
+	var field := TestField.new()
+	var chassis := RigidBody3D.new()   # `TestField._chassis` 是 RigidBody3D 类型
+	field._chassis = chassis        # 只用局部坐标换算，不进场景树
+	field._clip_boxes = [
+		{"box": AABB(), "name": "（自己那一件，空盒）"},
+		{"box": AABB(Vector3(0.4, -0.5, -0.5), Vector3(1, 1, 1)), "name": "挡在枪口前"},
+	]
+	var from := Vector3(0, 0, 0)
+	var to := Vector3(1, 0, 0)
+	var point := field._first_blocked_point(from, to, 0)   # 跳过下标 0（自己）
+	assert_true(
+		point.x > 0.39 and point.x < 0.71,
+		"落点应该在挡路那块零件上（枪口 → 生成点之间）：%s" % point
+	)
+	assert_eq(field._first_blocked_point(from, to, 1), from, "没东西挡就退回起点")
+	chassis.free()
+	field.free()
+
+
 ## 命中那一下的最后一段光带：子弹在同帧就没了，这一截要留一会儿才看得见
 ## （用户报的"开火到命中很近就不会出现射弹轨迹"）。
 func test_hit_ghost_keeps_the_last_segment_visible() -> void:

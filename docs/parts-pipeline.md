@@ -721,8 +721,11 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
     现在开火前先用同一条 `Turret.segment_blocker()` 查**枪口→生成点**这一段：
     有东西就当场算自吃（`_muzzle_eaten` 记账、HUD 显示"枪口自吃 N 发"、`_last_hit` 说明被谁挡），
     不生成弹丸（弹丸的射线从生成点才开始，跨过的那一格它永远看不到）。
+   弹丸没生成，所以要**自己补一个命中小爆炸**（放在枪口→生成点之间**第一个被挡住的地方**，
+   `TestField._first_blocked_point()`）—— 不然贴脸开火什么都看不见。
     自己的那一件（`part_index`）照旧跳过 —— 枪口本来就贴在自己枪管的端面上。
-    断言：`test_segment_blocker_checks_the_line_against_part_boxes`。
+   断言：`test_segment_blocker_checks_the_line_against_part_boxes`、
+   `test_muzzle_self_hit_supplies_an_impact_point`。
   - **开火**（2026-10-12 接上）：炮塔按 `weapon_traverse_speed`（度/秒，水平俯仰共用）
     慢慢跟瞄点（`update_aim(target, delta)`；目标角先折到"离当前角最近的那个等价角"，
     所以跨 ±180° 也不绕远）；按住扳机（**空格 / 鼠标左键**）按 `weapon_rpm` 连续发射，
@@ -740,8 +743,14 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
     散射 = 以枪轴为轴、半角 `weapon_spread` 的圆锥内**均匀**取方向（cosθ 在
     [cos(spread), 1] 上均匀；直接 yaw/pitch 各取均匀会把弹着挤在锥的边缘 —— 有断言：
     半角内的比例应该在 25% 附近）。
-    - **打到自己车体 → 子弹直接消失**（不造成伤害、不留效果）——用户定的规则：抛物线和
-      散射会让子弹绕回来打到自己。打到别的碰撞体 → 记一发命中 + 一个小火花（伤害还没有接收方）。
+    - **打到自己车体 → 子弹直接消失、不造成伤害**，但**照样放命中小爆炸** ——
+      用户 2026-10-14 改的：抛物线和散射会让子弹绕回来打到自己，调枪口 / 射界 / 贴脸自吃时
+      得看得见这一发打在自己哪儿（原来"不留任何效果"，不好观察）。
+      处置收在一个纯函数里：`Projectiles.hit_plan(owner_rids, owner_key, hit_rid)`
+      → `{self, impact, damage}`（自己 = `impact: true / damage: false`），测试直接打它
+      —— `step()` 那条路要真实物理空间，而测试进程拿不到 `direct_space_state`。
+      打到别的碰撞体 → 记一发命中 + 同样那个小火花（伤害还没有接收方）。
+      断言：`test_self_hit_is_effect_only`、`test_muzzle_self_hit_supplies_an_impact_point`。
     - 视觉 = **整条"上一帧位置 → 这一帧位置"的线段都点亮**（沿位移方向拉长的光带，位置取线段
       中点、粗细不跟着放大）。一开始是"固定长度、夹在 1.5 格以内"，可子弹一快（600 m/s ≈
       3000 格/秒，一帧走 25 格）那点光几乎看不见 —— 用户报的"子弹太不显眼"。现在光带长度 =
