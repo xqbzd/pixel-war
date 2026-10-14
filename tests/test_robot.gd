@@ -641,6 +641,38 @@ func test_world_calibration_is_consistent() -> void:
 	)
 
 
+## 悬挂参数**按车重自动算**：轻车和重车的"静止下沉量 / 阻尼比 / 支撑力倍数"必须一样。
+## 用户报的"更轻的载具会像弹簧一样飞天"就是因为旧参数是**绝对值**：
+## 给两吨车调的刚度套到轻车上几乎不压（等于没悬挂），而支撑力上限还是车重的几十倍。
+func test_suspension_scales_with_vehicle_weight() -> void:
+	var library := _library()
+	var axle: PartDef = library.get_def("wheel_axle_2x2")
+	if axle == null:
+		return
+	assert_true(axle.wheel_ride_sag > 0.0, "轮子文件应该改用相对量的悬挂参数（wheel_ride_sag）")
+	var gravity := PartDef.GRAVITY_CUBES
+	var heavy_load := 2270.0 * gravity / 8.0    # 你那台 111：2.27 吨 / 8 轮
+	var light_load := 300.0 * gravity / 4.0     # 一台小轻车：300 kg / 4 轮
+	var heavy := axle.resolved_suspension(heavy_load, heavy_load / gravity)
+	var light := axle.resolved_suspension(light_load, light_load / gravity)
+	assert_almost_eq(
+		heavy_load / float(heavy["stiffness"]),
+		light_load / float(light["stiffness"]),
+		0.0001,
+		"静止下沉量必须一样（刚度跟着负载走）"
+	)
+	var heavy_zeta := float(heavy["damper_c"]) / (2.0 * sqrt(float(heavy["stiffness"]) * heavy_load / gravity))
+	var light_zeta := float(light["damper_c"]) / (2.0 * sqrt(float(light["stiffness"]) * light_load / gravity))
+	assert_almost_eq(heavy_zeta, light_zeta, 0.001, "阻尼比（相对临界阻尼）也要一样")
+	assert_almost_eq(
+		float(heavy["max_force"]) / heavy_load,
+		float(light["max_force"]) / light_load,
+		0.01,
+		"支撑力上限要按车重缩（不然轻车一点小坎就被弹飞）"
+	)
+	assert_true(float(light["max_force"]) < 300.0 * gravity * 40.0, "轻车的上限不能还是老的大数字")
+
+
 ## 手感辅助的生效强度：**有轮着地就朝满、一个没着地就朝 0**（不看轮数比例），
 ## 各按 `ground_blend_seconds` 过渡 —— 所以落地是平滑恢复，不是"啪"地跳一下。
 func test_handling_blend_switches_on_any_contact() -> void:

@@ -696,14 +696,12 @@ func _add_wheel(veh: Dictionary, spec: Dictionary, wheel_count: int) -> void:
 	if def != null:
 		rest = maxf(0.05, def.wheel_rest_length)
 		travel = maxf(0.05, def.wheel_suspension_travel)
-		# 悬挂：**直接值**（N/格、N·秒/格），部件文件里写多少就是多少，没有倍率/参考值
-		stiffness = maxf(1.0, def.wheel_stiffness)
+		# 悬挂：刚度/阻尼/支撑力上限由 `resolved_suspension()` 按**这台车的轮负载**算
+		# （部件文件写 `wheel_ride_sag` / `wheel_damper_ratio` / `wheel_support_multiple`；
+		# 写 `wheel_ride_sag = 0` 才退回旧的绝对值），见下面 `wheel_load` 那段。
 		# 抓地力：`wheel_mu` 直接给就优先用它，否则按 `wheel_friction` 换算（上限 `wheel_mu_max`）。
 		# 下限 0.05 只是防止"写了 0 摩擦 → 轮子完全不抓地、车停在原地漂"，不是手感钳制。
 		mu = maxf(0.05, def.resolved_wheel_mu())
-		max_force = maxf(100.0, def.wheel_suspension_max_force)
-		damp_c = def.wheel_damper_compression
-		damp_r = def.wheel_damper_relaxation
 		grip_gain = def.wheel_grip_gain
 		brake_gain = def.wheel_brake_gain
 		roll_gain = def.wheel_roll_gain
@@ -718,6 +716,14 @@ func _add_wheel(veh: Dictionary, spec: Dictionary, wheel_count: int) -> void:
 	var gravity := _world_gravity()
 	# 静止压缩量 = 这个轮子承担的重量 ÷ 刚度（见 compression_at_rest()）：纯物理，车重了自然压得多
 	var wheel_load := mass * gravity / float(count)
+	# 悬挂参数**按这台车（这个轮子）的重量**解析出来 —— 同一套参数在轻重车上手感一致：
+	# 轻车不会被"几十倍车重"的支撑力上限弹飞（用户报的"更轻的载具像弹簧一样飞天"）。
+	if def != null:
+		var sus := def.resolved_suspension(wheel_load, wheel_load / maxf(0.001, gravity))
+		stiffness = maxf(1.0, float(sus["stiffness"]))
+		damp_c = float(sus["damper_c"])
+		damp_r = float(sus["damper_r"])
+		max_force = maxf(100.0, float(sus["max_force"]))
 	var static_compression := compression_at_rest(wheel_load, stiffness, rest)
 	# ⚠️ 行程太短 = 悬挂"到底"：到底之后支撑力停在 k×行程 上，车再往下就压不动，
 	# 车身贴着地面走、轮胎看着像"入地"（用户踩过的坑）。这里提前告警，写清两个数。

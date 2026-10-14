@@ -43,7 +43,7 @@ weapon_projectile   = bullet  # 射弹类型：目前只有 bullet = 受重力�
 weapon_muzzle_speed = 500     # 子弹初速度，m/s
 weapon_damage       = 500     # 每发伤害
 weapon_rpm          = 500     # 射速，发/分钟
-weapon_spread       = 1     # 初速度的随机角散射，度（±，锥形）
+weapon_spread       = 0.5     # 初速度的随机角散射，度（±，锥形）
 weapon_traverse_speed = 720    # 炮塔最高转速，度/秒（水平、俯仰共用这一个）
 weapon_energy_cost  = 100      # 每发耗能（核心提供 10000 上限 + 1000/s 恢复）
 # 弹丸寿命（秒）：打出去多久自动消失。**射速 × 寿命 = 同屏最多几发**，防卡爆主要靠它

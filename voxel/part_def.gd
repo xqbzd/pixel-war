@@ -98,6 +98,18 @@ var wheel_suspension_travel := 0.3
 ## 弹簧刚度 N/格：把悬挂压 1 格需要多少力。**软硬的唯一入口**。
 ## 静止压缩量 = 这个轮子承担的重量 ÷ 刚度（纯物理，车重了自然压得更多，没有倍率）。
 var wheel_stiffness := 150000.0
+## ── 悬挂：**按车重自动算**（2026-10-14 用户要求：同一套参数在轻重车上手感一致）──────
+## 旧的 `wheel_stiffness` / `wheel_damper_*` / `wheel_suspension_max_force` 是**绝对值**：
+## 给两吨车调的 300000 N/格 + 150000 N 上限，套到几百公斤的车上就是"静止几乎不压
+## （等于没悬挂）+ 支撑力上限还是车重的几十倍" → 一个小坎就把车弹上天
+## （用户报的"更轻的载具会像弹簧一样飞天"）。下面三个量**相对车重**：
+##   `wheel_ride_sag`        静止时悬挂压下去多少格 → 刚度 = 该轮静态负载 ÷ 它
+##   `wheel_damper_ratio`    阻尼相对**临界阻尼**（1.0 = 刚好不回弹）→ c = 2·ζ·√(刚度 × 单轮质量)
+##   `wheel_support_multiple` 单轮最大支撑力 = 该轮静态负载 × 它
+## `wheel_ride_sag <= 0` 时退回上面那套旧绝对值（老部件文件不会坏）。
+var wheel_ride_sag := 0.0
+var wheel_damper_ratio := 0.0
+var wheel_support_multiple := 0.0
 ## 阻尼系数 N·秒/格：压缩（往下压）和回弹（伸出去）可以不一样。
 ## 参考值（想要"刚好不振荡"）：临界阻尼 c = 2 × √(刚度 × 单轮质量)，
 ## 取它的 0.4~0.7 倍比较舒服；比临界大 = 发闷，小了 = 过坎会弹几下。
@@ -537,6 +549,30 @@ func fire_interval_seconds() -> float:
 	if weapon_rpm <= 0.0:
 		return INF
 	return 60.0 / weapon_rpm
+
+
+## 按**这台车的重量**把悬挂参数解出来：{stiffness, damper_c, damper_r, max_force}。
+## `wheel_load` = 这个轮子承担的静态重量（N），`wheel_mass` = 对应的质量（kg）。
+## 车重变了（零件被打掉）就再算一次。`wheel_ride_sag <= 0` 时退回旧的绝对值。
+func resolved_suspension(wheel_load: float, wheel_mass: float) -> Dictionary:
+	if wheel_ride_sag <= 0.0:
+		return {
+			"stiffness": wheel_stiffness,
+			"damper_c": wheel_damper_compression,
+			"damper_r": wheel_damper_relaxation,
+			"max_force": wheel_suspension_max_force,
+		}
+	var stiffness := maxf(1.0, wheel_load / maxf(0.001, wheel_ride_sag))
+	# 临界阻尼 c = 2√(k·m)；乘上用户写的比例（< 1 会回弹一下，> 1 更闷）
+	var critical := 2.0 * sqrt(stiffness * maxf(0.001, wheel_mass))
+	var ratio := maxf(0.0, wheel_damper_ratio)
+	return {
+		"stiffness": stiffness,
+		"damper_c": critical * ratio,
+		"damper_r": critical * ratio,
+		# 上限跟着车重走：轻车不会被"几十倍车重"的支撑力弹飞
+		"max_force": wheel_load * maxf(1.0, wheel_support_multiple),
+	}
 
 
 ## 最终用于模拟的抓地力（库仑摩擦系数 mu）：`wheel_mu` > 0 就直接用它，
@@ -1021,6 +1057,14 @@ func _apply(key: String, value: String, line_no: int) -> void:
 			wheel_suspension_travel = _parse_float(value, wheel_suspension_travel, line_no, key, 0.0)
 		"wheel_stiffness":
 			wheel_stiffness = _parse_float(value, wheel_stiffness, line_no, key, 0.0)
+		"wheel_ride_sag":
+			wheel_ride_sag = _parse_float(value, wheel_ride_sag, line_no, key, 0.0)
+		"wheel_damper_ratio":
+			wheel_damper_ratio = _parse_float(value, wheel_damper_ratio, line_no, key, 0.0)
+		"wheel_support_multiple":
+			wheel_support_multiple = _parse_float(
+				value, wheel_support_multiple, line_no, key, 0.0
+			)
 		"wheel_suspension_max_force":
 			wheel_suspension_max_force = _parse_float(
 				value, wheel_suspension_max_force, line_no, key, 0.0

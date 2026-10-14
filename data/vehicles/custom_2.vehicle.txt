@@ -1,0 +1,19 @@
+# 由建造模式保存（坐标就是建造场地里的坐标，原样还原）
+# 格式：part = <部件id> <x> <y> <z> yaw pitch roll（角度 90 度一档）
+name = 未命名载具
+
+part = cube_full 3 1 0 0 270 0
+part = cube_full 3 1 -1 0 90 0
+part = wheel_axle_2x2 3 1 -3 90 0 0
+part = wheel_axle_2x2 3 1 1 270 0 0
+part = cube_full 4 1 -1 0 0 270
+part = cube_full 4 1 0 0 0 270
+part = cube_full 5 1 -1 0 0 270
+part = cube_full 5 1 0 0 0 270
+part = cube_full 6 1 -1 0 0 270
+part = cube_full 6 1 0 0 0 270
+part = wheel_axle_2x2 6 1 -3 90 0 0
+part = wheel_axle_2x2 6 1 1 270 0 0
+part = cube_full 6 2 0 0 0 0
+part = cube_full 6 2 -1 0 0 0
+part = core 4 2 -1 90 270 0
