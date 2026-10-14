@@ -96,13 +96,8 @@ const STOP_GRIP_SPEED := 1.0
 ## 0.1 秒的延迟对固有周期约 0.4 秒的支撑回路就是四分之一周期，直接把车推成自激振荡
 ## （连原本稳的两吨车都开始抖着升空）。**削尖峰请用下面的硬截断，不要用滤波。**
 const SUSP_FORCE_FILTER_SECONDS := 0.0
-## 单轮支撑力的**硬截断**（倍车重）：射线式悬挂在临界高度上会给出"一帧满力"的尖峰，
-## 这里直接把力截掉。1.0 = 一个轮子的力不许超过**整车重量**。
-## 为什么这样行：截断**不改相位**（不像滤波会加滞后），所以不会自激；
-## 静止时单轮只有车重÷轮数，离这个上限很远，只有尖峰会被削。
-## 对比：零件文件里的 `wheel_suspension_max_force = 150000 N` —— 对 230 kg 的小车是
-## 66 倍轮重、对 2310 kg 的车是 3.3 倍轮重，固定绝对值在轻重车上完全是两回事。
-const SUSP_PEAK_FORCE_CAR_WEIGHTS := 1.0
+## 单轮支撑力的硬截断倍率**写在部件文件里**（`wheel_peak_force_car_weights`，倍车重，用户手调）：
+## 射线在临界高度上会给出"一帧满力"的尖峰，硬截断削掉它、**不改相位**（滤波会加滞后 → 自激）。
 ## 轮胎**视觉**转速（和物理无关，纯给玩家看的）：
 ##   - 不跟 `VehicleWheel3D.get_rpm()` 走 —— 滑行时它恒为 0、给油时又乱跳（"看着像随机乱转"）；
 ##   - 自己按"地面速度 / 半径"算滚动，再在**这个轮子正在输出**时叠加一个指示转速，
@@ -738,11 +733,6 @@ func _add_wheel(veh: Dictionary, spec: Dictionary, wheel_count: int) -> void:
 	var gravity := _world_gravity()
 	# 静止压缩量 = 这个轮子承担的重量 ÷ 刚度（见 compression_at_rest()）：纯物理，车重了自然压得多
 	var wheel_load := mass * gravity / float(count)
-	# ★ 单轮支撑力**硬截断在"一倍车重"**（见 SUSP_PEAK_FORCE_CAR_WEIGHTS 的说明）：
-	# 射线在临界高度上会给出"一帧满力"的尖峰，硬截断能削掉它、又**不引入相位滞后**
-	# （这是和"低通滤波"最本质的区别 —— 滤波会把车推成自激振荡）。
-	# 悬挂和整圈射线共用这个 `max_force`，所以尖峰来源一起管住。
-	var peak_force := mass * gravity * SUSP_PEAK_FORCE_CAR_WEIGHTS
 	# 悬挂参数**按这台车（这个轮子）的重量**解析出来 —— 同一套参数在轻重车上手感一致：
 	# 轻车不会被"几十倍车重"的支撑力上限弹飞（用户报的"更轻的载具像弹簧一样飞天"）。
 	if def != null:
@@ -751,8 +741,11 @@ func _add_wheel(veh: Dictionary, spec: Dictionary, wheel_count: int) -> void:
 		damp_c = float(sus["damper_c"])
 		damp_r = float(sus["damper_r"])
 		max_force = maxf(100.0, float(sus["max_force"]))
-	if SUSP_PEAK_FORCE_CAR_WEIGHTS > 0.0:
-		max_force = minf(max_force, maxf(100.0, peak_force))
+	# ★ 单轮支撑力**硬截断在"整车重量 × 倍率"**（倍率写在部件文件 `wheel_peak_force_car_weights`）：
+	# 射线在临界高度上会给出"一帧满力"的尖峰，硬截断削掉它、**不引入相位滞后**
+	# （滤波会把车推成自激振荡，已试过）。悬挂和整圈射线共用这个 `max_force`。
+	if def != null and def.wheel_peak_force_car_weights > 0.0:
+		max_force = minf(max_force, maxf(100.0, mass * gravity * def.wheel_peak_force_car_weights))
 	var static_compression := compression_at_rest(wheel_load, stiffness, rest)
 	# ⚠️ 行程太短 = 悬挂"到底"：到底之后支撑力停在 k×行程 上，车再往下就压不动，
 	# 车身贴着地面走、轮胎看着像"入地"（用户踩过的坑）。这里提前告警，写清两个数。

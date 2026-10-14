@@ -110,6 +110,11 @@ var wheel_stiffness := 150000.0
 var wheel_ride_sag := 0.0
 var wheel_damper_ratio := 0.0
 var wheel_support_multiple := 0.0
+## 单轮支撑力的**硬截断**（倍**车重**，用户手动调）：一个轮子的力不许超过"整车重量 × 它"。
+## 1.0 = 一倍车重；0 = 不截断。射线式悬挂在临界高度上会给出"一帧满力"的尖峰，硬截断能削掉它
+## 而且**不改相位**（低通滤波会加滞后、把支撑回路推成自激振荡 —— 试过，连两吨的车都抖）。
+## 静止时单轮只有"车重 ÷ 轮数"，离上限很远，所以只有尖峰被削。
+var wheel_peak_force_car_weights := 1.0
 ## 阻尼系数 N·秒/格：压缩（往下压）和回弹（伸出去）可以不一样。
 ## 参考值（想要"刚好不振荡"）：临界阻尼 c = 2 × √(刚度 × 单轮质量)，
 ## 取它的 0.4~0.7 倍比较舒服；比临界大 = 发闷，小了 = 过坎会弹几下。
@@ -1067,6 +1072,11 @@ func _apply(key: String, value: String, line_no: int) -> void:
 		"wheel_support_multiple":
 			wheel_support_multiple = _parse_float(
 				value, wheel_support_multiple, line_no, key, 0.0
+			)
+		"wheel_peak_force_car_weights":
+			# 单轮力硬截断（倍车重）。0 = 不截断
+			wheel_peak_force_car_weights = _parse_float(
+				value, wheel_peak_force_car_weights, line_no, key, 0.0
 			)
 		"wheel_suspension_max_force":
 			wheel_suspension_max_force = _parse_float(

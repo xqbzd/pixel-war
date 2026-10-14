@@ -134,6 +134,8 @@ wheel_suspension_max_force = 150000    # 上限要高于"刚度 × 行程"（620
 #   wheel_anti_roll_damping = 阻尼相对临界阻尼的倍率（1.0 = 刚好不来回摆）
 wheel_anti_roll_tilt      = 23   # 度（≈ 横向 1 g 时倾 23°；0 = 关掉防翻）
 wheel_anti_roll_damping   = 0.55
-#   上限就是下面那个**绝对值** `wheel_suspension_max_force`（不需要按车重缩放 ——
-#   稳定性由隐式阻尼负责，见 scripts/test_field.gd 的 `_apply_wheel`）。
-wheel_support_multiple     = 0
+#   单轮支撑力的**硬截断**（用户手调）：一个轮子的力 ≤ 整车重量 × 它。1 = 一倍车重；0 = 不截断。
+#   射线式悬挂在临界高度上会给出"一帧满力"的尖峰，截断能削掉它而且**不改相位**
+#   （低通滤波会加滞后、把支撑回路推成自激，连两吨的车都抖 —— 试过，别用）。
+#   静止时单轮只有"车重 ÷ 轮数"，离上限很远，所以只削尖峰、不影响手感。
+wheel_peak_force_car_weights = 1
