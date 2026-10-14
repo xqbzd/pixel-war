@@ -26,36 +26,53 @@ hp        = 4000
 pp        = 10
 
 # ── 轮子参数（只有这个部件用得上；每个轮轴各自读自己这一组）──────────────
-# 🚩 2026-10-15：轮胎力模型**换成了 Pacejka**（移植自 nani_raycast_wheel.gd，MIT，
-#    见 reference/nani_raycast_wheel/）。**下面这些键才是现在生效的**：
+# 🚩 2026-10-15（第二次改）：**横向**用 Pacejka（移植自 nani_raycast_wheel.gd，MIT，
+#    见 reference/nani_raycast_wheel/）；**纵向**改成"直接给力"（原生 VehicleWheel3D 那套）。
+#    上一版把纵向也照它做成"驱动轮力矩 + 轮子自转"，那套在这个尺度下会崩 ——
+#    驱动轮力矩远大于轮胎能提供的反作用力矩，轮子会无限自转、推力被摩擦上限顶死、
+#    和油门完全脱钩，症状就是"极速设 30 却能开到 60、松油门还在加速"。下面才是现在生效的口径：
 #
 #   【悬挂】力 = 压缩量 × wheel_stiffness + wheel_damper_compression × 压缩速度
-#     wheel_stiffness            弹簧刚度 N/格（静止下沉 = 单轮负重 ÷ 它）
+#     wheel_stiffness            弹簧刚度 N/格
+#        ⚠️ 实际静止下沉 ≈ 单轮负重 ÷ 刚度 × (1.5 ~ 2.5)：阻尼走隐式积分（不然这个量级的
+#           阻尼数值上会炸），稳定但会"稀释"弹簧；稀释倍率随单轮质量变（大车小、小车大）。
+#           要"看着压多少"就按实测反推，别按裸刚度算。
 #     wheel_damper_compression   阻尼 N·秒/格（**只有这一个生效**；
 #                                wheel_damper_relaxation 已不用 —— 新模型只有一份阻尼）
 #     wheel_rest_length          悬挂自由长度（格）
 #     wheel_suspension_travel    行程上限（格），压到底就顶住
 #     wheel_peak_force_car_weights  单轮力上限 = 整车重量 × 它（削尖峰用；0 = 不截断）
 #
-#   【轮胎】力 = 法向载荷 × peak × sin(shape·atan(stiff·s − curve·(stiff·s − atan(stiff·s))))
-#            s 侧向 = 速度方向与车轮朝向的夹角；s 纵向 = (ω·半径 − 前进速度)/|前进速度|
-#     wheel_grip_factor    抓地总倍率（乘在侧/纵轮胎力上）：>1 更粘，<1 更滑
+#   【轮胎】法向载荷 = 这个轮子这一帧的支撑力；轮胎能给的最大力 = 载荷 × peak × grip_factor
 #     wheel_lat_pacejka    侧向四系数  peak stiff curve shape（原作者值 1 10 0 1.35）
-#     wheel_long_pacejka   纵向四系数  peak stiff curve shape（原作者值 1 10 0 1.65）
-#       小滑移时侧偏刚度 ≈ 载荷 × peak × stiff × shape；想"更咬地"就加 peak 或 stiff。
-#     驱动/刹车走**力矩**：油门把它换算成"驱动轮力矩 = 推力 × 半径"，
-#       刹车力矩 = wheel_engine_force × 半径 × 1.5（想单独调刹车告诉我，我接个键）。
-#     低速（< 0.1 格/秒）时**不走 Pacejka**：直接给"把残余速度削平"的力 —— 这是治抖的关键。
+#       侧向力 = 载荷 × peak × sin(shape·atan(stiff·s − curve·(stiff·s − atan(stiff·s))))
+#       s = 速度方向与车轮朝向夹角的**正弦**；小滑移时侧偏刚度 ≈ 载荷 × peak × stiff × shape
+#       想"更咬地"就加 peak 或 stiff。
+#     wheel_long_pacejka   纵向四系数 —— **只用到第 1 个 peak 当"摩擦上限"**（和横向同口径）
+#     wheel_grip_factor    抓地总倍率：>1 更粘，<1 更滑（侧向力和上下限一起缩放）
+#     ★ 低速另有一道"防抖闸"：轮胎力不超过"一步之内把这个轮子的滑移速度削平"所需的力。
+#       Pacejka 是按滑移**角**算力的，静止/低速时那个角被数值噪声推到 ±90° 直接饱和，
+#       力就会帧间来回顶满（车原地抖、横向力 ±19 kN 来回）。加上这道闸之后实测：
+#       静置 4/4 着地、速度 0.00、单轮支撑力正好等于静重。
 #
-#   【转向 / 限速 / 视觉】照旧生效：
+#   【驱动 / 刹车】纵向是**直接给车身的力**（不是力矩；轮子已经没有自转状态了）：
+#     wheel_engine_force   每个驱动轮的推力上限 N
+#       ⚠️ 真正落到地上的力 = min(它 × 限速衰减, 载荷 × peak × grip_factor)。
+#          也就是说**抓地上限比电机小的时候，加速由抓地决定、这个键调不出效果** ——
+#          想用推力调加速，就把它压到抓地上限以下（现在这台的抓地上限 ≈ 载荷 × 1.0）。
+#     wheel_max_speed      限速 m/s：推力按 cos(π/2 × v / vmax) 衰减，**到 vmax 时正好为 0**
+#       ⚠️ 实际极速会比它低一点（被轮胎侧偏阻力 + Godot 的 linear_damp 吃掉 5~10%）
+#          —— 实测：写 30 → 小车 28、大车 26.4。想要 30 就写 33 左右。
+#     刹车：按反方向键时给 -前进速度 × wheel_brake_gain，同样按摩擦上限截断；
+#           没油门又几乎不动时也走这一路（低速驻车，不然松手后车会一直"漂"着走）。
+#
+#   【转向 / 视觉】照旧生效：
 #     wheel_steer_max / wheel_steer_speed / wheel_steer_return_speed
-#     wheel_max_speed（m/s，超了按余弦衰减收油）
 #     wheel_rays / wheel_ray_slack / wheel_sus_sector / wheel_ray_offset
-#     wheel_engine_force（N，换算成驱动力矩）
 #
 #     wheel_grip_gain、wheel_slip_falloff、wheel_slip_ref、wheel_brake、
 #     wheel_brake_gain、wheel_roll_gain、wheel_damper_relaxation、wheel_mu_per_friction、
-#     wheel_mu_max。
+#     wheel_mu_max、wheel_mass。
 # 标定（2026-10-14 改）：1 cube = 0.5 米 ⇒ project.godot 的重力是 19.6 cube/s²
 # （= 真实 9.8 m/s²）。**下面这些"力"不跟着标定变** —— 它们是"格世界"里的数，
 # 决定的是 a/g（动力/重力比）这个手感；标定变小/变大时它们要不要缩，是另一回事。
@@ -124,16 +141,19 @@ wheel_ray_offset          = 0.4
 #   底盘高度不用管：硬点是按"静止压缩量"反推的，轮胎底面永远落在你摆的位置上。
 #
 # 阻尼怎么选：临界阻尼 c = 2 × √(刚度 × 单轮质量)，取它的 0.5~1.5 倍一般都舒服。
-#   你这套：2 × √(2480000 × 76) ≈ 27460 → 0.5 倍 ≈ 14000、1.0 倍 ≈ 27500。
-#   比临界小 = 过坎弹两下；比临界大 = 发闷（现在 66000/99000 ≈ 2.4/3.6 倍，基本没有回弹）。
+#   你这套（530 kg 小车）：生效刚度 ≈ 132000、单角簧上质量 133 kg → 临界 ≈ 8380；
+#   写 20000 经隐式积分折成 ≈ 8900 ≈ 1.06 倍临界（正好不过冲、也不发闷）。
+#   比临界小 = 过坎弹两下；比临界大很多 = 发闷。
 # ⚠️ 下面这四项是**配套的**，改一个要跟着改另外几个（不然会出现"车贴地走/轮胎入地"）。
 # 悬挂参数是**零件固有值**（绝对值，和车重无关）。曾经试过"按车重自动算"那套，撤了 ——
 # 轻车被弹飞的根因不是比值，而是"射线式悬挂会在临界高度给出**一帧跳变**的力"，
 # 那个用**低通滤波**治（`SUSP_FORCE_FILTER_SECONDS`，见 scripts/test_field.gd）。
-wheel_stiffness            = 300000    # 弹簧刚度 N/格（静止压 = 该轮负载 ÷ 这个数）
-wheel_damper_compression   = 20000     # 压缩时的阻尼 N·秒/格
+#   实测（2026-10-15，530 kg 小车 / 133 kg 单角簧上质量）：这个 300000 的刚度 +
+#   下面 20000 的阻尼，静止压缩量是 **0.0295 格**（= 单轮静重 3895 N ÷ 实际生效刚度 132000）。
+wheel_stiffness            = 300000    # 弹簧刚度 N/格
+wheel_damper_compression   = 20000     # 压缩时的阻尼 N·秒/格（隐式积分，实际生效值 ≈ 1/2.25）
 # ★ 行程上限（格）：**至少要是"静止压缩量"的 5 倍**，软悬挂建议 15~20 倍。
-#   这里静止压 0.06 格 → 写 1.2 = 20 倍（24 厘米行程，过坎、落地都够用）。
+#   实测静止压 0.0295 格 → 写 1.2 = 40 倍（60 厘米行程，过坎、落地都够用）。
 #   写 0.3（= 5 倍、6 厘米）会**经常到底**：到底之后支撑力停在 k×行程 上不再涨，
 #   车身就贴着地面走、轮胎看着像陷进地里（实测 8 个轮子里 4 个卡在 0.3 上限）。
 wheel_suspension_travel    = 1.2
@@ -155,10 +175,11 @@ wheel_anti_roll_damping   = 0.55
 #   静止时单轮只有"车重 ÷ 轮数"，离上限很远，所以只削尖峰、不影响手感。
 wheel_peak_force_car_weights = 2
 
-wheel_mass                 = 25       # 轮子自己的质量 kg（自转惯量 I=½mr² 用；不是车重）。写 0 = 按车重平摊（旧行为，会慢很多）
+# 已失效（纵向改成"直接给力"之后就没有轮子自转状态了）：wheel_mass。
 # ── 轮胎力模型（Pacejka，移植自 nani_raycast_wheel.gd，MIT，见 reference/ 目录）──
-#   轮胎力 = 法向载荷 × peak × sin(shape·atan(stiff·滑移 − curve·(stiff·滑移 − atan(stiff·滑移))))
+#   **侧向**力 = 法向载荷 × peak × sin(shape·atan(stiff·滑移 − curve·(stiff·滑移 − atan(stiff·滑移))))
 #   小滑移时 ≈ 载荷 × peak × stiff × shape（侧偏刚度），大滑移自动饱和（不会把车掀翻）。
+#   纵向只取第 1 个 peak 当摩擦上限，推力本身用 wheel_engine_force（见上面【驱动/刹车】）。
 #   下面三个键的默认值就是原作者那份，先按原样跑。
 wheel_grip_factor          = 1              # 抓地总倍率：>1 更粘地，<1 更滑
 wheel_lat_pacejka          = 1 10 0 1.35    # 侧向四系数：peak stiff curve shape

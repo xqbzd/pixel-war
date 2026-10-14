@@ -255,8 +255,18 @@ func test_wheel_parameters_live_in_the_part_file() -> void:
 		axle.wheel_anti_roll_tilt_deg > 0.0,
 		"防翻倾角上限应 > 0（单位是度，0 = 关掉）：%s" % axle.wheel_anti_roll_tilt_deg
 	)
-	# 抓地力：写了 wheel_mu 就直读，不写才从 wheel_friction 换算
-	assert_true(axle.resolved_wheel_mu() > 1.2, "抓地力应能超过老版本的 1.2 上限：%s" % axle.resolved_wheel_mu())
+	# 抓地力：2026-10-15 起住在 `wheel_grip_factor` 和 `wheel_lat_pacejka` 的 peak 里
+	# （`wheel_mu` 那套是老模型的换算，已经不用了）。验证"能从部件文件读到、并且能超过老上限"。
+	assert_true(axle.wheel_grip_factor > 0.0, "抓地倍率应 > 0：%s" % axle.wheel_grip_factor)
+	var grippy := PartDef.from_text(
+		"name = 粘地\nshape = cube\ncubes = 1 1 1\nwheel_grip_factor = 1.8\nwheel_lat_pacejka = 1.8 10 0 1.35\n",
+		"res://data/parts/test_grip_high.part.txt"
+	)
+	assert_true(
+		grippy.wheel_grip_factor > 1.2 and float(grippy.wheel_lat_pacejka[0]) > 1.2,
+		"抓地力应能超过老版本的 1.2 上限：%s / %s"
+			% [grippy.wheel_grip_factor, str(grippy.wheel_lat_pacejka)]
+	)
 	# 默认值：普通方块没写这些键，也得有一组能用的
 	var bare := PartDef.from_text(
 		"name = 裸轮参数\nshape = cube\ncubes = 1 1 1\n", "res://data/parts/test_bare_wheel.part.txt"

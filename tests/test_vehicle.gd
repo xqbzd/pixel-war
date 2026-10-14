@@ -353,12 +353,14 @@ func test_wheel_specs() -> void:
 	var offset: Vector3 = specs[0]["offset"]
 	assert_true(offset.y <= 0.001, "轮胎中心应落在车身格子底面上：%s" % offset)
 	assert_true(absf(offset.z) > 1.0, "轮胎应挂在车身侧面：%s" % offset)
-	# 重心的正负分界要跟着重量走：把重心往一边压，两侧的符号应该翻过来
+	# 重心的正负分界要跟着重量走：把重心往一边压，两侧的符号应该翻过来。
+	# ⚠️ 核心只有 30 kg、每个轮轴 100 kg，所以"把核心摆远"只能把重心拉到 x ≈ 2.4 ——
+	#    想让两个轮子都落在重心之后，轮子得摆得更近些（x = 0.5 / 1.5 都在 2.4 之前）。
 	var heavy := VehicleDef.new()
 	heavy.parts = [
 		{"part_id": "core", "cell": Vector3i(8, 0, 0), "basis": Basis()},
 		{"part_id": "wheel_axle_2x2", "cell": Vector3i(0, 0, 1), "basis": side},
-		{"part_id": "wheel_axle_2x2", "cell": Vector3i(2, 0, 1), "basis": side},
+		{"part_id": "wheel_axle_2x2", "cell": Vector3i(1, 0, 1), "basis": side},
 	]
 	var heavy_specs := heavy.wheel_specs(library)
 	assert_eq(
