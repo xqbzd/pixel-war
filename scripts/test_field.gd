@@ -94,7 +94,7 @@ const STOP_GRIP_SPEED := 1.0
 ## 但"射线在临界高度上突然够到地面"造成的**一帧跳变**会被摊平成几帧。
 ## 这是替代"按车重自适应悬挂"的方案（用户 2026-10-14 定的）：零件参数回到固有绝对值，
 ## 稳定性由这个滤波器负责。0 = 关掉滤波（回到"一帧满力"的老行为）。
-const SUSP_FORCE_FILTER_SECONDS := 0.1
+const SUSP_FORCE_FILTER_SECONDS := 0.03
 ## 轮胎**视觉**转速（和物理无关，纯给玩家看的）：
 ##   - 不跟 `VehicleWheel3D.get_rpm()` 走 —— 滑行时它恒为 0、给油时又乱跳（"看着像随机乱转"）；
 ##   - 自己按"地面速度 / 半径"算滚动，再在**这个轮子正在输出**时叠加一个指示转速，
@@ -1915,22 +1915,9 @@ func _apply_wheel(veh: Dictionary, entry: Dictionary, delta: float) -> void:
 			float(entry["damp_compression"]) if rrate > 0.0
 			else float(entry["damp_relaxation"])
 		)
-		# ★ 整圈射线也吃同一道低通滤波：**"稍微不平就疯狂抖"就是它们干的** ——
-		# 台阶/路缘让某条射线的穿透量一帧跳一下，显式形式立刻给出几十倍轮重的径向力
-		# （`max_force` 对 230 kg 的车是每轮 66 倍），车就被顶起来。滤波把突变摊平到几帧。
-		var rwanted := clampf(
+		var rpush := clampf(
 			stiffness * penetration + rdamp * rrate, 0.0, float(entry["max_force"])
 		)
-		var rblend := 1.0
-		if SUSP_FORCE_FILTER_SECONDS > 0.0:
-			rblend = 1.0 - exp(-delta / SUSP_FORCE_FILTER_SECONDS)
-		var rfiltered: Array = entry.get("ray_push", [])
-		if rfiltered.size() != rays:
-			rfiltered.resize(rays)
-			rfiltered.fill(0.0)
-		var rpush := lerpf(float(rfiltered[i]), rwanted, rblend)
-		rfiltered[i] = rpush
-		entry["ray_push"] = rfiltered
 		if rpush <= 0.0:
 			continue
 		_apply_tire_force(
