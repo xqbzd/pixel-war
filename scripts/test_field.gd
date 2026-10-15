@@ -4,12 +4,12 @@ class_name TestField
 ## 测试场：把载具按物理摆进一整块现成场地（Truck Town 的城镇 + 赛道模型）里，验证轮子能不能跑。
 ##
 ##   - 轮轴（带 `wheel_body` 的部件）→ **自定义轮胎节点**：从轮心朝圆周打 16 条等距射线
-##     （每 22.5° 一条，整圈判定），每条接触 = 径向弹簧 + 阻尼 + 库仑摩擦（见 `_apply_wheel()`）。
+##     （每 22.5° 一条，整圈判定），合并接触后每轮只计算一份弹簧、阻尼和摩擦。
 ##     为什么不用 `VehicleWheel3D`：它每个轮子只有一条竖直射线、不可配，骑台阶/路缘/坡脚时
 ##     "感觉不到"，越野很差（试过一簇多射线 + 视觉去穿透，都不划算，已回滚）。
 ##     轮胎**转动**也是自己按地面速度驱动的（`_spin_tire()`）。
 ##   - 其余零件 → 合成一个 `RigidBody3D` 底盘：每个零件一个 BoxShape（本体包围盒，
-##     不含轮胎），质量取部件数值之和，质心取各零件重心按重量加权 —— 只在进场时算一次。
+##     不含轮胎），质量取部件数值之和，质心取各零件重心按重量加权；毁伤更新刚体，悬挂参数保持进场快照。
 ##   - 场地：**一整块现成模型** `assets/arena/truck_town/town_model.gltf`
 ##     （Godot 官方 demo "Truck Town"，MIT；里面是 10 栋房子 + 赛道 + 5 个坡道 +
 ##     巨型轮胎障碍 + 2 公里见方的地面，本来就是给车开的场景）。
@@ -22,10 +22,7 @@ class_name TestField
 const MENU_SCENE := "res://scenes/main_menu.tscn"
 const VEHICLE_DIR := "res://data/vehicles"
 const GameSettings := preload("res://scripts/game_settings.gd")
-## 出生高度（格）：车底离地这么多，**轻轻落下**。
-## ⚠️ 别写大：2.5 格 = 1.25 米，轻车（比如 230 kg 那台）落地时会**砸**下来 ——
-## 悬挂行程只有 1.2 格，吸收不了这个落差，车会一直弹（用户报的"进测试场过几秒疯狂抖"）。
-## 0.3 格 = 6 厘米，够让悬挂自己就位，又不会砸。
+## 出生高度（格）：车底离地 0.3 格（0.15 米），让悬挂轻轻落地。
 const SPAWN_HEIGHT := 0.3
 ## 场地：一整块现成模型（Truck Town，MIT）。1 模型单位 ≈ 1 米左右（房子 6~10 单位高）。
 ## 想改倍数：进游戏按 `[` / `]` 现场调（HUD 显示当前倍数），定了告诉我我改这个默认值。
@@ -89,15 +86,6 @@ const REVERSE_BRAKE_SPEED_CUBES := 0.6
 ## 用刹车那套增益把残余速度按平（不然静止的车会被支撑力的横向分量慢慢推走 ——
 ## 实测 0.1 格/秒²，小车滑到轮子射线的临界点就会被弹飞）。
 const STOP_GRIP_SPEED := 1.0
-## 悬挂支撑力的**低通滤波时间常数**（秒）：`push` 每帧朝目标值走
-## `1 - exp(-delta / 这个数)` 的比例 —— 稳态力（顶住车重那一份）保持精确，
-## 但"射线在临界高度上突然够到地面"造成的**一帧跳变**会被摊平成几帧。
-## ⚠️ 2026-10-14 试过 0.03 / 0.1：低通滤波看着能削尖峰，实际是给"支撑力回路"加**相位滞后** ——
-## 0.1 秒的延迟对固有周期约 0.4 秒的支撑回路就是四分之一周期，直接把车推成自激振荡
-## （连原本稳的两吨车都开始抖着升空）。**削尖峰请用下面的硬截断，不要用滤波。**
-const SUSP_FORCE_FILTER_SECONDS := 0.0
-## 单轮支撑力的硬截断倍率**写在部件文件里**（`wheel_peak_force_car_weights`，倍车重，用户手调）：
-## 射线在临界高度上会给出"一帧满力"的尖峰，硬截断削掉它、**不改相位**（滤波会加滞后 → 自激）。
 ## 轮胎**视觉**转速（和物理无关，纯给玩家看的）：
 ##   - 不跟 `VehicleWheel3D.get_rpm()` 走 —— 滑行时它恒为 0、给油时又乱跳（"看着像随机乱转"）；
 ##   - 自己按"地面速度 / 半径"算滚动，再在**这个轮子正在输出**时叠加一个指示转速，
@@ -138,7 +126,7 @@ const ENEMY_SPAWN_LIFT := 1.5
 
 ## ── 自定义轮胎：整圈等距射线 ──────────────────────────────────────────────
 ## 每帧从轮心朝**轮平面里的圆周**打 WHEEL_RAYS 条等距射线（每 22.5° 一条），
-## 每条打中的射线算一个接触点：径向弹簧 + 阻尼给法向力，切向给摩擦（横向抓地 + 纵向驱动）。
+## 射线只收集接触，选取最深接触后，每个车轮只施加一次支撑力和轮胎摩擦。
 ## 这样做的好处是**整圈都能判定**：台阶、路缘、坡脚从任何角度顶到轮胎上，轮子都感觉得到，
 ## 于是能被顶开/爬上去 —— 原生 VehicleWheel3D 只有一条向下的射线，这些全都感觉不到。
 ##
@@ -177,37 +165,23 @@ const WHEEL_SLIP_REF := 16.0   # 横向滑移到这个速度时，横向摩擦�
 ## （默认值见下，tilt 写 0 = 关掉防翻）。
 const ANTI_ROLL_MAX_TILT := 0.14      # 弧度（= 8°）：横向 1 g 时的侧倾角上限
 const ANTI_ROLL_DAMPING := 0.55       # 相对临界阻尼（单一的比值，不再乘别的数）
-## 整圈射线里，跟"下"夹角小于这个值的射线**跳过** —— 那一片（轮子正下方）归悬挂那条射线管，
-## 否则平地上十几条射线一起顶，等于把弹簧并联了十几倍。
+## 整圈射线里，dir·down 超过阈值的下方扇区交给主射线，避免重复探测平地接触。
 const WHEEL_SUS_SECTOR := 0.5   # dir·down > 0.5 → 与"下"夹角 < 60°
 
 
 ## 整圈射线里，"轮子正下方那一扇区"归悬挂那条射线管，整圈这一层要跳过它。
-##
-## ⚠️ 判据是 `dir · down`（**下**），不是 `dir · up` —— 2026-10-12 之前这里写的是 `-down`，
-## 于是跳掉的是**朝上**那一扇区（朝上的射线本来就什么也打不到），正下方那 5 条却全留在场上：
-## 平地上每个轮子就有 2~3 个接触点（正下方那条 + 压缩大了以后的 ±22.5°），
-## 支撑刚度、阻尼、纵向/横向抓地都会随压缩量**跳变**（等于悬挂比你调的硬一倍），
-## 表现就是"怎么调都飘 / 不稳 / 打方向一路叠加"。
+## 判据是 `dir · down`，不能写成 `dir · up`。最终接触仍会合并为每轮一次施力。
 static func ring_ray_belongs_to_suspension(dir: Vector3, down: Vector3, sector: float) -> bool:
 	return dir.dot(down) > sector
 
 
-## 静止时悬挂压下去多少（格）：**这个轮子承担的重量 ÷ 弹簧刚度**，纯物理、没有倍率。
-## 悬挂硬点按它往上抬，静止时轮心就正好落在作者摆的位置（轮胎底面贴地、不入地）。
-## 刚度低 → 压得多（车矮、变软）；刚度高 → 压得少（车高、变硬）；软到压穿就夹在 `rest`。
-## 断言：`test_wheel_hub_keeps_the_authored_ride_height`。
-static func compression_at_rest(wheel_load: float, stiffness: float, rest: float) -> float:
-	return clampf(wheel_load / maxf(1.0, stiffness), 0.005, rest)
-
-
-## 行程够不够：悬挂压到 `travel` 就**到底**了，之后支撑力停在"刚度 × 行程"上不再涨，
-## 车再往下就压不动 —— 表现是车身贴着地面走、轮胎看着"入地"（用户踩过：
-## 行程 0.3 + 静态下沉 0.06 = 只有 5 倍静载余量，一过坎/落地就到底，8 个轮子里 4 个卡在 0.30）。
-## 经验值：行程至少要有静态压缩量的 5 倍以上，软悬挂建议 15~20 倍（实测踩过 4 倍那一档）。
-static func travel_is_too_short(travel: float, static_compression: float) -> bool:
-	# 判据取"≤ 5 倍"：实测 0.3 / 0.06 = 正好 5 倍时就已经会经常到底了（8 个轮子 4 个卡住）
-	return travel <= static_compression * 5.0
+## Godot 单射线车轮的弹簧 + 速度阻尼模型。参数是进场快照，单位为格世界的力。
+## 压缩速度 > 0 表示压入接触面；负速度表示回弹。支撑只推不拉。
+## 不把弹簧项除以阻尼积分系数，保证静态 F = kx、触底 F = 倍率 × 初始单轮静载。
+static func suspension_force(compression: float, compression_speed: float, params: Dictionary) -> float:
+	var spring := float(params["stiffness"]) * clampf(compression, 0.0, float(params["travel"]))
+	var damper := float(params["damping"]) * compression_speed
+	return clampf(spring + damper, 0.0, float(params["max_force"]))
 
 
 ## 判定射线该往哪边挪多少（返回**带符号**的标量，沿轮轴方向）：
@@ -465,8 +439,7 @@ func _spawn(vehicle: VehicleDef) -> void:
 	_vehicles.append(player_entry)
 	_wheels = player_entry["wheels"]
 	var specs := vehicle.wheel_specs(_library)
-	for spec in specs:
-		_add_wheel(player_entry, spec, specs.size())
+	_initialize_vehicle_wheels(player_entry, specs)
 	# 武器：每个转塔一个节点组（底座固定 / 支架水平 / 枪管俯仰），每帧朝准星瞄点转
 	for pair in weapon_parts:
 		var wplace := BuildGrid.cell_transform(
@@ -576,8 +549,7 @@ func _spawn_enemy_replicas(vehicle: VehicleDef) -> void:
 		chassis.global_rotation = Vector3(0.0, atan2(-to_spawn.z, to_spawn.x), 0.0)
 		var entry := {"rig": rig, "chassis": chassis, "wheels": [], "is_player": false}
 		_vehicles.append(entry)
-		for spec in specs:
-			_add_wheel(entry, spec, specs.size())
+		_initialize_vehicle_wheels(entry, specs)
 		_enemies.append(rig)
 		_vehicles_by_rid[chassis.get_rid()] = rig
 		if rig.hitboxes != null:
@@ -650,6 +622,18 @@ func _on_parts_destroyed(rig: VehicleRig, dead: Array) -> void:
 		_kills += 1
 
 
+## 玩家与靶子共用的进场初始化。毁伤只移除车轮，不能重新分摊负载或改动幸存轮参数。
+func _initialize_vehicle_wheels(veh: Dictionary, specs: Array) -> void:
+	if veh.has("initial_mass"):
+		return
+	var chassis: RigidBody3D = veh["chassis"]
+	veh["initial_mass"] = chassis.mass
+	veh["initial_wheel_count"] = specs.size()
+	veh["initial_gravity"] = _world_gravity() * chassis.gravity_scale
+	for spec in specs:
+		_add_wheel(veh, spec)
+
+
 ## 一个轮轴 → 一个自定义轮胎节点：节点放在轮胎几何中心，轮胎网格作为子节点
 ## （轮胎的转动是我们自己贴的，见 `_spin_tire()`）。
 ##
@@ -660,7 +644,7 @@ func _on_parts_destroyed(rig: VehicleRig, dead: Array) -> void:
 ## **判定射线的侧向位置**（`wheel_ray_offset`）：射线默认打在轮胎的**中缝**平面上，
 ## 写 `wheel_ray_offset = 0.4` 这种正值就把整套射线沿轴向**往外侧**挪（0.4 ≈ 这张轮胎
 ## 0.81 格宽的一半 = 外侧面）。挪的是**射线**，轮胎网格和轮心不动。
-func _add_wheel(veh: Dictionary, spec: Dictionary, wheel_count: int) -> void:
+func _add_wheel(veh: Dictionary, spec: Dictionary) -> void:
 	var chassis: RigidBody3D = veh["chassis"]
 	var place: Transform3D = spec["transform"]
 	var offset: Vector3 = (spec["offset"] as Vector3) - _spawn_center
@@ -687,18 +671,15 @@ func _add_wheel(veh: Dictionary, spec: Dictionary, wheel_count: int) -> void:
 			node_basis * Vector3(1.0, 0.0, 0.0),
 			axis
 		)
-	# 悬挂：硬点在**轮胎中心上方**（rest - sag）处，静止时压缩量正好是 sag ——
-	# 于是轮心停在作者摆的那个位置上（轮胎底面贴地、不入地），行驶中它沿悬挂轴上下动。
-	# 刚度 = 静态负载 ÷ 目标压缩量；部件文件里的 stiffness 当相对倍率（150 = 基准）。
-	var mass := maxf(1.0, chassis.mass)
-	var count := maxi(1, wheel_count)
-	var rest := 0.15
-	var travel := 0.3
-	var stiffness := 150000.0
+	# 只在进场时按这台车的初始质量、轮数计算。刚体质量日后可以变，参数快照不变。
+	var suspension_def := def if def != null else PartDef.new()
+	var sus := suspension_def.resolved_suspension(
+		float(veh["initial_mass"]), int(veh["initial_wheel_count"]), float(veh["initial_gravity"])
+	)
+	var rest := float(sus["rest"])
+	var travel := float(sus["travel"])
+	var static_compression := float(sus["static_compression"])
 	var mu := 1.0
-	var max_force := 30000.0
-	var damp_c := 4250.0
-	var damp_r := 6400.0
 	# 手感旋钮：默认取模块常量，部件文件里写了就用文件里的（每个轮轴可以不一样）
 	var grip_gain := WHEEL_GRIP_GAIN
 	var brake_gain := WHEEL_BRAKE_GAIN
@@ -711,11 +692,6 @@ func _add_wheel(veh: Dictionary, spec: Dictionary, wheel_count: int) -> void:
 	var anti_roll_tilt := ANTI_ROLL_MAX_TILT
 	var anti_roll_damping := ANTI_ROLL_DAMPING
 	if def != null:
-		rest = maxf(0.05, def.wheel_rest_length)
-		travel = maxf(0.05, def.wheel_suspension_travel)
-		# 悬挂：刚度/阻尼/支撑力上限由 `resolved_suspension()` 按**这台车的轮负载**算
-		# （部件文件写 `wheel_ride_sag` / `wheel_damper_ratio` / `wheel_support_multiple`；
-		# 写 `wheel_ride_sag = 0` 才退回旧的绝对值），见下面 `wheel_load` 那段。
 		# 抓地力：`wheel_mu` 直接给就优先用它，否则按 `wheel_friction` 换算（上限 `wheel_mu_max`）。
 		# 下限 0.05 只是防止"写了 0 摩擦 → 轮子完全不抓地、车停在原地漂"，不是手感钳制。
 		mu = maxf(0.05, def.resolved_wheel_mu())
@@ -730,34 +706,7 @@ func _add_wheel(veh: Dictionary, spec: Dictionary, wheel_count: int) -> void:
 		sus_sector = def.wheel_sus_sector
 		anti_roll_tilt = deg_to_rad(def.wheel_anti_roll_tilt_deg)   # 文件里写的是度
 		anti_roll_damping = def.wheel_anti_roll_damping
-	var gravity := _world_gravity()
-	# 静止压缩量 = 这个轮子承担的重量 ÷ 刚度（见 compression_at_rest()）：纯物理，车重了自然压得多
-	var wheel_load := mass * gravity / float(count)
-	# 悬挂参数**按这台车（这个轮子）的重量**解析出来 —— 同一套参数在轻重车上手感一致：
-	# 轻车不会被"几十倍车重"的支撑力上限弹飞（用户报的"更轻的载具像弹簧一样飞天"）。
-	if def != null:
-		var sus := def.resolved_suspension(wheel_load, wheel_load / maxf(0.001, gravity))
-		stiffness = maxf(1.0, float(sus["stiffness"]))
-		damp_c = float(sus["damper_c"])
-		damp_r = float(sus["damper_r"])
-		max_force = maxf(100.0, float(sus["max_force"]))
-	# ★ 单轮支撑力**硬截断在"整车重量 × 倍率"**（倍率写在部件文件 `wheel_peak_force_car_weights`）：
-	# 射线在临界高度上会给出"一帧满力"的尖峰，硬截断削掉它、**不引入相位滞后**
-	# （滤波会把车推成自激振荡，已试过）。悬挂和整圈射线共用这个 `max_force`。
-	if def != null and def.wheel_peak_force_car_weights > 0.0:
-		max_force = minf(max_force, maxf(100.0, mass * gravity * def.wheel_peak_force_car_weights))
-	var static_compression := compression_at_rest(wheel_load, stiffness, rest)
-	# ⚠️ 行程太短 = 悬挂"到底"：到底之后支撑力停在 k×行程 上，车再往下就压不动，
-	# 车身贴着地面走、轮胎看着像"入地"（用户踩过的坑）。这里提前告警，写清两个数。
-	if travel_is_too_short(travel, static_compression):
-		push_warning(
-			"测试场：%s 的悬挂行程太短 —— 行程 %.3f 格，静止就要压 %.3f 格（%.1f 倍）。"
-			% [
-				str(spec["part_id"]), travel, static_compression,
-				travel / maxf(0.001, static_compression),
-			]
-			+ "过坎/落地会「到底」，车身会贴地走。建议行程 ≥ 静态压缩量 × 5（软悬挂 15~20 倍）。"
-		)
+	# 硬点按自由长度减静态压缩量摆放，保留建造时的轮心高度。
 	var hub: Vector3 = offset + Vector3(0.0, 1.0, 0.0) * (rest - static_compression)
 	var wheel := Node3D.new()
 	wheel.name = "Wheel%d" % (veh["wheels"] as Array).size()
@@ -777,8 +726,6 @@ func _add_wheel(veh: Dictionary, spec: Dictionary, wheel_count: int) -> void:
 		mesh_node.transform = Transform3D(child_basis, -(child_basis * local_centre))
 		mesh_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 		wheel.add_child(mesh_node)
-	# 悬挂阻尼的等效质量 = 这个角上的簧上质量（整车 ÷ 轮数）：隐式阻尼积分要用它。
-	var corner_mass := maxf(1.0, mass / float(count))
 	(veh["wheels"] as Array).append({
 		"node": wheel,
 		"base_basis": node_basis,     # 转向 = 这个朝向再绕底盘上方向转一个角
@@ -796,19 +743,18 @@ func _add_wheel(veh: Dictionary, spec: Dictionary, wheel_count: int) -> void:
 		"offset": offset,             # 作者摆的轮胎中心（静止位置）
 		"suspension": rest - static_compression,  # 当前悬挂长度（硬点 → 轮心），每帧更新
 		# 整圈射线的轮胎参数
-		"stiffness": stiffness,       # 弹簧（单位力 / cube 压缩量）
+		"stiffness": float(sus["stiffness"]),
 		"rest": rest,
 		"travel": travel,
-		"max_force": max_force,
-		# 这个角上的簧上质量 = 整车质量 ÷ 轮数：只有**悬挂阻尼的隐式积分**和
-		# 轮胎力的"低速防抖闸"要用它（见 `_apply_wheel`）。
-		"corner_mass": corner_mass,
+		"max_force": float(sus["max_force"]),
+		# 单轮初始分摊质量，毁伤后保持不变。
+		"corner_mass": float(sus["corner_mass"]),
+		"static_compression": static_compression,
 		# ── 轮胎力模型（Pacejka，移植自 nani_raycast_wheel.gd，MIT）──
 		"grip_factor": def.wheel_grip_factor if def != null else 1.0,
 		"lat_pacejka": (def.wheel_lat_pacejka if def != null else [1.0, 10.0, 0.0, 1.35]),
 		"long_pacejka": (def.wheel_long_pacejka if def != null else [1.0, 10.0, 0.0, 1.65]),
-		"damp_compression": damp_c,   # 阻尼系数（N·秒/格，直接值）
-		"damp_relaxation": damp_r,
+		"damping": float(sus["damping"]),   # c = 2√(k × 初始单轮质量)
 		"mu": mu,                     # 库仑摩擦系数
 		# 整圈射线的形状 / 摩擦手感（全部来自部件文件，见 _add_wheel 开头）
 		"grip_gain": grip_gain,       # 横向抓地增益（速度 × 增益 = 力）
@@ -1817,200 +1763,140 @@ func _steer_wheel(entry: Dictionary) -> void:
 	)
 
 
-## 自定义轮胎的物理 = **悬挂（1 条射线，带行程）+ 整圈 16 射线（探障碍）**。
-##
-## ① 悬挂：从**硬点**沿底盘的"下"打一条射线（长度 = rest + 半径 + 行程）。够得着地面就
-##    按 (rest + 半径 − d) 算压缩量；轮心 = 硬点 + 下 × (rest − 压缩量) —— **轮胎网格跟着走**，
-##    所以静止时轮胎底面正好贴地（不再像上一版那样把轮胎按进地里），过坎时也看得见行程。
-##    支撑力 = k × 压缩量 + c × 压缩速度，作用在接触点上（带力矩，压弯悬挂时车身会侧倾）。
-## ② 整圈射线：从**当前轮心**朝轮平面里的圆周打 WHEEL_RAYS 条等距射线，跟"下"夹角小于
-##    WHEEL_SUS_SECTOR 的那一片跳过（那一片归悬挂管）—— 剩下的方向负责探台阶/路缘/坡脚：
-##    每条按"压缩量 = 半径 − 距离"给一个径向弹簧力，作用在各自的接触点上（台阶顶到轮胎前缘
-##    时会顺带给车头抬头力矩，这才是能爬上去的关键）。
-## ③ 摩擦：横向（沿轮轴）抵侧滑、纵向（轮子前进方向）给油门/刹车，都按 mu × 法向力截断。
-## 刚度/阻尼/mu 全从轮轴自己的部件文件换算，见 `_add_wheel()`。
-func _apply_wheel(veh: Dictionary, entry: Dictionary, delta: float) -> void:
-	var chassis: RigidBody3D = veh["chassis"]
+## 接触探测：悬挂主射线决定轮心高度，整圈射线探测台阶、路缘及上方障碍。
+## 多条命中只选最深的一个，沿命中面的真实法线施力，避免射线数量放大弹簧力。
+func _wheel_contact(chassis: RigidBody3D, entry: Dictionary) -> Dictionary:
 	var node: Node3D = entry["node"]
-	if node == null or not is_instance_valid(node) or _space == null:
-		return
-	var chassis_xform := chassis.global_transform
-	var down := -(chassis_xform.basis * Vector3(0.0, 1.0, 0.0)).normalized()
+	var xform := chassis.global_transform
+	var down := -xform.basis.y.normalized()
 	var radius := float(entry["radius"])
 	var rest := float(entry["rest"])
 	var travel := float(entry["travel"])
 	var exclude: Array[RID] = [chassis.get_rid()]
-	var stiffness := float(entry["stiffness"])
-	var lin := chassis.linear_velocity
-	var ang := chassis.angular_velocity
-	var mu := float(entry["mu"])
-	var drive_in := float(entry.get("drive", 0.0))
-	var braking := bool(entry.get("braking", false))
-	var brake_gain := float(entry["brake_gain"]) * clampf(float(entry["brake"]) / 60.0, 0.25, 3.0)
-	var com := chassis_xform * chassis.center_of_mass
-	# ── ① 悬挂：一条沿"下"的射线，既决定轮心位置，也给支撑力 ──
-	# `ray_shift` = 判定射线的侧向偏移（沿轮胎轴向，正 = 车外）：整套判定挪到轮胎外侧面，
-	# 轮胎网格和轮心不动（见 `_add_wheel` 与 `outboard_shift()`）。
-	var ray_shift := float(entry.get("ray_shift", 0.0))
-	var shift_world := (node.global_transform.basis * Vector3(1.0, 0.0, 0.0)).normalized() * ray_shift
-	var hub := chassis_xform * (entry["hub"] as Vector3) + shift_world
-	var reach := rest + radius + travel + 0.2
-	var sq := PhysicsRayQueryParameters3D.create(hub, hub + down * reach, 1, exclude)
-	var sh := _space.intersect_ray(sq)
+	var axle := node.global_transform.basis.x.normalized()
+	var shift := axle * float(entry["ray_shift"])
+	var hub := xform * (entry["hub"] as Vector3) + shift
+	var reach := rest + radius
+	var query := PhysicsRayQueryParameters3D.create(hub, hub + down * reach, 1, exclude)
+	var hit := _space.intersect_ray(query)
 	var compression := 0.0
-	var ground_point := Vector3.ZERO
-	var ground_dir := down
-	if not sh.is_empty():
-		var d: float = (sh["position"] as Vector3).distance_to(hub)
-		compression = clampf(rest + radius - d, 0.0, travel)
-		ground_point = sh["position"]
-		ground_dir = (sh["normal"] as Vector3).normalized()
+	var best := {}
+	if not hit.is_empty():
+		compression = clampf(rest + radius - hub.distance_to(hit["position"]), 0.0, travel)
+		best = {"depth": compression, "point": hit["position"], "normal": hit["normal"]}
 	entry["suspension"] = rest - compression
-	# 轮心沿悬挂轴移动 —— 轮胎网格是它的子节点，所以视觉上跟着物理悬挂走
-	node.position = (entry["hub"] as Vector3) + Vector3(0.0, -1.0, 0.0) * (rest - compression)
-	var centre := node.global_position
-	entry["contact"] = compression > 0.0
-	# ── 接触收集：悬挂射线 + 整圈射线，取**最深**的一个当"这个轮子的接触" ──
-	# ★ **力按"轮"算一次**（2026-10-15，参照 397★ 的 Easy Vehicle Physics 的做法）：
-	#   以前 16 条射线**各自**算一套弹簧+阻尼再加起来 = 把弹簧并联十几倍，
-	#   任何一条射线的穿透跳变都会变成十几倍轮重的尖峰（我们反复自激的根）。
-	#   现在射线只负责**探测**：谁扎得最深就用谁 —— 法向、接触点、速度都取那一个，
-	#   弹簧/阻尼**只算一次**。多射线的价值保留在"方向"上：
-	#   台阶/路缘的法向是斜的，车会被往斜上顶（能爬上去），而不是只会垂直支撑。
-	#   法向统一成"背离障碍"（地面接触 = 底盘上方，射线接触 = -射线方向）。
-	var best_depth := -1.0
-	var best_point := Vector3.ZERO
-	var best_normal := Vector3.ZERO
-	var best_velocity := Vector3.ZERO
-	if compression > 0.0:
-		best_depth = compression
-		best_point = ground_point
-		best_normal = -down
-		best_velocity = lin + ang.cross(ground_point - com)
-	var axle := (node.global_transform.basis * Vector3(1.0, 0.0, 0.0)).normalized()
-	centre += shift_world   # 整圈射线同样挪到轮胎外侧面
-	var up_ref := (chassis_xform.basis * Vector3(0.0, 1.0, 0.0)).normalized()
-	var sus := up_ref - axle * up_ref.dot(axle)
-	sus = sus.normalized() if sus.length() > 0.001 else up_ref
+	node.position = (entry["hub"] as Vector3) + Vector3.DOWN * (rest - compression)
+	var centre := node.global_position + shift
+	var up := -down
+	var sus := up - axle * up.dot(axle)
+	sus = sus.normalized() if sus.length() > 0.001 else up
 	var fwd := axle.cross(sus).normalized()
-	# ⚠️ `axle × sus` 只保证"垂直于轮轴"，左右两侧的挂载是镜像的，它可能指向车尾 ——
-	# 那样一半轮子往后推、整车原地不动（原生 VehicleWheel3D 踩过同一个坑）。
-	if fwd.dot(chassis_xform.basis.x) < 0.0:
+	if fwd.dot(xform.basis.x) < 0.0:
 		fwd = -fwd
 	var rays := int(entry["rays"])
 	var ring_reach := radius + float(entry["ray_slack"])
-	var sus_sector := float(entry["sus_sector"])
 	for i in rays:
 		var angle := TAU * float(i) / float(rays)
 		var dir := (sus * cos(angle) + fwd * sin(angle)).normalized()
-		if ring_ray_belongs_to_suspension(dir, down, sus_sector):
-			continue   # 轮子正下方那一片归悬挂（判据见 ring_ray_belongs_to_suspension）
-		var rq := PhysicsRayQueryParameters3D.create(centre, centre + dir * ring_reach, 1, exclude)
-		var rh := _space.intersect_ray(rq)
-		if rh.is_empty():
+		if ring_ray_belongs_to_suspension(dir, down, float(entry["sus_sector"])):
 			continue
-		var rp: Vector3 = rh["position"]
-		var penetration := radius - rp.distance_to(centre)
-		if penetration <= best_depth:
+		query = PhysicsRayQueryParameters3D.create(centre, centre + dir * ring_reach, 1, exclude)
+		hit = _space.intersect_ray(query)
+		if hit.is_empty():
 			continue
-		best_depth = penetration
-		best_point = rp
-		best_normal = -dir
-		best_velocity = lin + ang.cross(rp - com)
-	entry["ray_depth"] = maxf(0.0, best_depth)   # 调试/统计用
-	if best_depth > 0.0:
-		# ── 悬挂力：弹簧照搬 nani_raycast_wheel.gd（MIT，见 reference/nani_raycast_wheel/）──
-		#   力 = 压缩量 × 弹簧刚度 + 阻尼刚度 × 压缩速度，clamp 到 [0, 上限]。
-		# ⚠️ **只有阻尼项不照抄**：它用"位置差分" `(x − x_prev)/delta` 当压缩速度，
-		#   而显式阻尼的稳定条件是 `dt < 2m/c` —— 我们 c = 20000 N·秒/格，230 kg 的小车
-		#   单角只有 57 kg、步长 1/120 秒时 `2m/c = 0.0057 秒 < dt`，**直接数值发散**
-		#   （阻尼力帧间反向、越算越大 —— 就是用户报的"轻车像弹簧一样飞天"）；
-		#   530 kg 这台也只剩 1.6 倍余量，实测静置时单轮支撑力被顶到 20776 N 上限
-		#   （= 单轮静重的 8 倍）、车在原地跳。它原项目用 12 kg 的轮子 + 1500 的阻尼，碰不到这条线。
-		#   改成 Godot / Bullet 那套**隐式阻尼**：阻尼吃"这一步更新**之后**的速度" → 无条件稳定，
-		#   不需要按车重调参数。推法：v' = (v − (k·x/m)·dt) / (1 + (c/m)·dt)，
-		#   施加的力取 m·(v − v')/dt（力学上等价于 F = k·x − c·v'）。
-		#   静止平衡时它自动退回 F = k·x（正好等于该轮静重）。
-		# 压不进去超过悬挂行程：这一步同时把"撞到台阶侧面"这种大穿透自然截住
-		var depth := minf(best_depth, travel)
-		var axis := -best_normal          # 压缩方向（沿它压进去；地面上就是 -down）
-		# ⚠️ 压缩速度取**车身在这个轮子处的上下速度**，**不含 `ang × r` 那一份**。
-		#   这是台架实测逼出来的：把接触点的转动份也塞进阻尼，俯仰/侧倾那两支会自激 ——
-		#   4 个轮子的阻尼项通过这些转动份互相耦合，等效质量远小于簧上质量，
-		#   隐式形式就压不住（实测：平地静置时 4 轮轮流离地、车身 ±2 厘米来回、3 秒不衰减，
-		#   高速时更是"一条轴一直腾空"→ 轮胎载荷只剩 1/4 → 加速和极速都被抓地力卡住）。
-		#   去掉转动份之后静置 4/4 着地、速度 0.00，行驶中车身也很稳。
-		#   俯仰/侧倾的阻尼另有其人：前/后、左/右弹簧力的差本身就是回正力矩，
-		#   侧倾另有 `_apply_anti_roll()`。
-		var rate := lin.dot(axis)   # > 0 = 车身正在往下压（压缩）
-		var damp := (
-			float(entry["damp_compression"]) if rate > 0.0
-			else float(entry["damp_relaxation"])
-		)
-		var point_mass := maxf(1.0, float(entry["corner_mass"]))
-		var v_new := (
-			(rate - (stiffness * depth / point_mass) * delta)
-			/ (1.0 + (damp / point_mass) * delta)
-		)
-		var push := clampf(
-			point_mass * (rate - v_new) / delta, 0.0, float(entry["max_force"])
-		)
-		# ── 轮胎力 ──
-		#   接触面上的两个方向：`fwd_now` = 车轮前进方向，`axle_now` = 横向（轮轴）。
-		var axle_now := (node.global_transform.basis * Vector3(1.0, 0.0, 0.0)).normalized()
-		axle_now = (axle_now - best_normal * axle_now.dot(best_normal)).normalized()
-		var fwd_now := best_normal.cross(axle_now).normalized()
-		if fwd_now.dot(chassis_xform.basis.x) < 0.0:
-			fwd_now = -fwd_now
-		var along := best_velocity.dot(fwd_now)     # 车轮处的**前进速度**（格/秒）
-		var side := best_velocity.dot(axle_now)     # 车轮处的**侧向速度**（格/秒）
-		var grip := float(entry["grip_factor"])
-		var lat_peak := float((entry["lat_pacejka"] as Array)[0])
-		var long_peak := float((entry["long_pacejka"] as Array)[0])
-		# 轮胎能给的最大力 = 法向载荷 × peak（就是 Pacejka 饱和时的值）× 抓地倍率
-		var lat_cap := push * lat_peak * grip
-		var long_cap := push * long_peak * grip
-		# ── 横向：Pacejka 曲线（照抄 nani_raycast_wheel 的 `calc_tire_force()`）──
-		#   滑移角 = 车轮速度方向与车轮朝向的夹角（速度很小时按方向算，看下一段的防抖闸）。
-		var planar := sqrt(side * side + along * along)
-		var lat_slip := asin(clampf(-side / maxf(0.000001, planar), -1.0, 1.0))
-		var lat_force := pacejka(push, lat_slip, entry["lat_pacejka"] as Array) * grip
-		# ★ **低速防抖闸（必须有）**：速度很小时滑移角被数值噪声推到 ±90°（饱和），
-		#   轮胎力就变成"每帧顶满 → 把速度推过头 → 反向再顶满"的 bang-bang，
-		#   车在原地一直抖（台架实测横向力 ±19 kN 来回、速度 ±0.5 格/秒不衰减）。
-		#   多这一道上限就没事：力**不超过"一步之内把这个轮子的滑移速度削平"所需的力** ——
-		#   低速时它 ∝ 速度（线性、不抖、一步到位），高速时它远大于摩擦上限（完全不参与）。
-		var anti_chatter := maxf(1.0, float(entry["corner_mass"])) / delta
-		var lat_bound := minf(lat_cap, absf(side) * anti_chatter)
-		lat_force = clampf(lat_force, -lat_bound, lat_bound)
-		# ── 纵向：**直接给力**（不是力矩）──
-		#   推力 = 每轮推力 × 油门 × 限速余弦衰减（`wheel_max_speed`），在 `_drive_vehicle` 里算好。
-		#   ⚠️ 2026-10-15 一度按 nani 那份改成"驱动轮力矩 + 轮子自转 ω 积分"，在这个尺度下不成立：
-		#   驱动轮力矩 15000 N·m 远大于轮胎能给的反作用力矩（摩擦上限 × 半径 ≈ 3.5 kN·m），
-		#   轮子会**无限加速自转**（台架实测 2142 弧度/秒）→ 推力被摩擦上限顶死、和油门脱钩 →
-		#   极速设 30 m/s 却开到 60、松油门还在加速。直接给力才是可调、可控、极速准的形式
-		#   （原生 VehicleWheel3D 也是这么干的）。
-		var long_force := 0.0
-		var drive := float(entry["drive"])
-		if braking:
-			long_force = clampf(-along * brake_gain, -long_cap, long_cap)
-		elif absf(drive) < 0.001 and absf(along) < STOP_GRIP_SPEED:
-			# 没油门又几乎不动：低速驻车（不然会一直"漂"着走）
-			long_force = clampf(-along * brake_gain, -long_cap, long_cap)
-		else:
-			long_force = clampf(drive, -long_cap, long_cap)
-		var total := best_normal * push + fwd_now * long_force + axle_now * lat_force
-		chassis.apply_force(total)
-		chassis.apply_torque((best_point - com).cross(total))
-		# 调试用：把这一帧的接触/轮胎量记在 entry 上（`tools/probe_flat.gd` 会打出来，
-		# 用来定位"静止自己走"/"超过极速"这类问题 —— 看哪个量在静止时就不为零）。
-		entry["dbg_depth"] = depth
-		entry["dbg_normal_y"] = best_normal.y
-		entry["dbg_long"] = long_force
-		entry["dbg_lat"] = lat_force
-		entry["dbg_along"] = along
-		entry["dbg_side"] = side
-		entry["push"] = push
+		var depth := radius - centre.distance_to(hit["position"])
+		if depth <= 0.0 or (not best.is_empty() and depth <= float(best["depth"])):
+			continue
+		best = {"depth": depth, "point": hit["position"], "normal": hit["normal"]}
+	return best
+
+
+## 参考 Godot VehicleBody3D::_update_suspension 和项目内 nani_raycast_wheel.gd：
+## 接触判定 → 弹簧 + 速度阻尼 → 轮胎力 → 在接触点施力。离地时立即清空载荷。
+## Godot 源码：https://github.com/godotengine/godot/blob/master/scene/3d/physics/vehicle_body_3d.cpp
+func _apply_wheel(veh: Dictionary, entry: Dictionary, delta: float) -> void:
+	entry["contact"] = false
+	entry["push"] = 0.0
+	entry["ray_depth"] = 0.0
+	for key in ["dbg_depth", "dbg_normal_y", "dbg_long", "dbg_lat", "dbg_along", "dbg_side"]:
+		entry[key] = 0.0
+	var chassis: RigidBody3D = veh["chassis"]
+	var node: Node3D = entry["node"]
+	if not is_instance_valid(node) or _space == null or delta <= 0.0:
+		return
+	var contact := _wheel_contact(chassis, entry)
+	if contact.is_empty():
+		return
+	entry["contact"] = true
+	var best_point: Vector3 = contact["point"]
+	var best_normal: Vector3 = (contact["normal"] as Vector3).normalized()
+	var chassis_xform := chassis.global_transform
+	var com := chassis_xform * chassis.center_of_mass
+	# 包含角速度引起的接触点速度，俯仰/侧倾也由悬挂阻尼衰减。
+	# 使用速度投影而非跨射线位置差分，避免切换接触点时产生虚假的压缩速度。
+	var best_velocity := chassis.linear_velocity + chassis.angular_velocity.cross(best_point - com)
+	var depth := minf(float(contact["depth"]), float(entry["travel"]))
+	var push := suspension_force(depth, -best_velocity.dot(best_normal), entry)
+	entry["ray_depth"] = depth
+	var braking := bool(entry.get("braking", false))
+	var brake_gain := float(entry["brake_gain"]) * clampf(float(entry["brake"]) / 60.0, 0.25, 3.0)
+	# ── 轮胎力 ──
+	#   接触面上的两个方向：`fwd_now` = 车轮前进方向，`axle_now` = 横向（轮轴）。
+	var axle_now := (node.global_transform.basis * Vector3(1.0, 0.0, 0.0)).normalized()
+	axle_now = (axle_now - best_normal * axle_now.dot(best_normal)).normalized()
+	var fwd_now := best_normal.cross(axle_now).normalized()
+	if fwd_now.dot(chassis_xform.basis.x) < 0.0:
+		fwd_now = -fwd_now
+	var along := best_velocity.dot(fwd_now)     # 车轮处的**前进速度**（格/秒）
+	var side := best_velocity.dot(axle_now)     # 车轮处的**侧向速度**（格/秒）
+	var grip := float(entry["grip_factor"])
+	var lat_peak := float((entry["lat_pacejka"] as Array)[0])
+	var long_peak := float((entry["long_pacejka"] as Array)[0])
+	# 轮胎能给的最大力 = 法向载荷 × peak（就是 Pacejka 饱和时的值）× 抓地倍率
+	var lat_cap := push * lat_peak * grip
+	var long_cap := push * long_peak * grip
+	# ── 横向：Pacejka 曲线（照抄 nani_raycast_wheel 的 `calc_tire_force()`）──
+	#   滑移角 = 车轮速度方向与车轮朝向的夹角（速度很小时按方向算，看下一段的防抖闸）。
+	var planar := sqrt(side * side + along * along)
+	var lat_slip := asin(clampf(-side / maxf(0.000001, planar), -1.0, 1.0))
+	var lat_force := pacejka(push, lat_slip, entry["lat_pacejka"] as Array) * grip
+	# ★ **低速防抖闸（必须有）**：速度很小时滑移角被数值噪声推到 ±90°（饱和），
+	#   轮胎力就变成"每帧顶满 → 把速度推过头 → 反向再顶满"的 bang-bang，
+	#   车在原地一直抖（台架实测横向力 ±19 kN 来回、速度 ±0.5 格/秒不衰减）。
+	#   多这一道上限就没事：力**不超过"一步之内把这个轮子的滑移速度削平"所需的力** ——
+	#   低速时它 ∝ 速度（线性、不抖、一步到位），高速时它远大于摩擦上限（完全不参与）。
+	var anti_chatter := maxf(1.0, float(entry["corner_mass"])) / delta
+	var lat_bound := minf(lat_cap, absf(side) * anti_chatter)
+	lat_force = clampf(lat_force, -lat_bound, lat_bound)
+	# ── 纵向：**直接给力**（不是力矩）──
+	#   推力 = 每轮推力 × 油门 × 限速余弦衰减（`wheel_max_speed`），在 `_drive_vehicle` 里算好。
+	#   ⚠️ 2026-10-15 一度按 nani 那份改成"驱动轮力矩 + 轮子自转 ω 积分"，在这个尺度下不成立：
+	#   驱动轮力矩 15000 N·m 远大于轮胎能给的反作用力矩（摩擦上限 × 半径 ≈ 3.5 kN·m），
+	#   轮子会**无限加速自转**（台架实测 2142 弧度/秒）→ 推力被摩擦上限顶死、和油门脱钩 →
+	#   极速设 30 m/s 却开到 60、松油门还在加速。直接给力才是可调、可控、极速准的形式
+	#   （原生 VehicleWheel3D 也是这么干的）。
+	var long_force := 0.0
+	var drive := float(entry["drive"])
+	if braking:
+		long_force = clampf(-along * brake_gain, -long_cap, long_cap)
+	elif absf(drive) < 0.001 and absf(along) < STOP_GRIP_SPEED:
+		# 没油门又几乎不动：低速驻车（不然会一直"漂"着走）
+		long_force = clampf(-along * brake_gain, -long_cap, long_cap)
+	else:
+		long_force = clampf(drive, -long_cap, long_cap)
+	var total := best_normal * push + fwd_now * long_force + axle_now * lat_force
+	chassis.apply_force(total, best_point - chassis.global_position)
+	# 调试用：把这一帧的接触/轮胎量记在 entry 上（`tools/probe_flat.gd` 会打出来，
+	# 用来定位"静止自己走"/"超过极速"这类问题 —— 看哪个量在静止时就不为零）。
+	entry["dbg_depth"] = depth
+	entry["dbg_normal_y"] = best_normal.y
+	entry["dbg_long"] = long_force
+	entry["dbg_lat"] = lat_force
+	entry["dbg_along"] = along
+	entry["dbg_side"] = side
+	entry["push"] = push
+
+
 ## Pacejka 轮胎公式（照搬 `nani_raycast_wheel.gd` 的 `pacejka()`，MIT）：
 ## `力 = 法向载荷 × peak × sin(shape·atan(stiff·s − curve·(stiff·s − atan(stiff·s))))`
 ## 小滑移时近似"载荷 × 侧偏刚度 × 滑移"，大滑移自动饱和 —— 所以轮胎力天生正比于支撑力。

@@ -23,7 +23,7 @@ const DEFAULT_EDGE := "8e8e96"
 ##     `wheel_max_speed_cubes()` 里做一次（1 m/s = 1/CUBE_METERS 格/秒）；
 ##   * 测试场的速度表按这个常量换算 km/h。
 ## 关卡：`test_world_calibration_is_consistent`（守"常量 / 重力 / 换算"三者一致）。
-## ⚠️ 力和弹簧**不跟着标定变**（它们是"格世界"里的数，见下面悬挂那一段的说明）。
+## 推力等直接数值使用格世界单位；悬挂刚度、阻尼按进场重力自动计算。
 const CUBE_METERS := 0.5
 ## 真实世界的重力加速度（m/s²）：世界的重力 = 这个数 ÷ CUBE_METERS（格/秒²）。
 const EARTH_GRAVITY := 9.8
@@ -86,35 +86,11 @@ var wheel_steer_speed := 90.0
 var wheel_steer_return_speed := 0.0
 ## 半径：0 = 按轮胎模型自动算（轮胎盒子 y/z 较大者的一半）。
 var wheel_radius := 0.0
-## ── 悬挂（**全是可直接调的物理量，没有倍率/参考值**）──────────────────────
-## ⚠️ 长度单位一律是**格**（1 格 = CUBE_METERS 米）；力是"格世界"里的 N、阻尼是 N·秒/格。
-## 这些是"格世界"里的数值（重力 = GRAVITY_CUBES 格/秒² = 真实 9.8 ÷ CUBE_METERS），
-## 别按真实米去算 —— 而且**改标定不用改这些数**：它们决定的是 a/g（动力/重力比），
-## 那才是手感。想让"真实 m/s²"不变，才需要按 1/CUBE_METERS 去缩。
-## `wheel_rest_length` = 悬挂自由长度（硬点比轮心高这么多）；
-## `wheel_suspension_travel` = 行程上限（最多压这么多，压到底就硬了，防止穿透）。
-var wheel_rest_length := 0.15
-var wheel_suspension_travel := 0.3
-## 弹簧刚度 N/格：把悬挂压 1 格需要多少力。**软硬的唯一入口**。
-## 静止压缩量 = 这个轮子承担的重量 ÷ 刚度（纯物理，车重了自然压得更多，没有倍率）。
-var wheel_stiffness := 150000.0
-## ── 悬挂：**按车重自动算**（2026-10-14 用户要求：同一套参数在轻重车上手感一致）──────
-## 旧的 `wheel_stiffness` / `wheel_damper_*` / `wheel_suspension_max_force` 是**绝对值**：
-## 给两吨车调的 300000 N/格 + 150000 N 上限，套到几百公斤的车上就是"静止几乎不压
-## （等于没悬挂）+ 支撑力上限还是车重的几十倍" → 一个小坎就把车弹上天
-## （用户报的"更轻的载具会像弹簧一样飞天"）。下面三个量**相对车重**：
-##   `wheel_ride_sag`        静止时悬挂压下去多少格 → 刚度 = 该轮静态负载 ÷ 它
-##   `wheel_damper_ratio`    阻尼相对**临界阻尼**（1.0 = 刚好不回弹）→ c = 2·ζ·√(刚度 × 单轮质量)
-##   `wheel_support_multiple` 单轮最大支撑力 = 该轮静态负载 × 它
-## `wheel_ride_sag <= 0` 时退回上面那套旧绝对值（老部件文件不会坏）。
-var wheel_ride_sag := 0.0
-var wheel_damper_ratio := 0.0
-var wheel_support_multiple := 0.0
-## 单轮支撑力的**硬截断**（倍**车重**，用户手动调）：一个轮子的力不许超过"整车重量 × 它"。
-## 1.0 = 一倍车重；0 = 不截断。射线式悬挂在临界高度上会给出"一帧满力"的尖峰，硬截断能削掉它
-## 而且**不改相位**（低通滤波会加滞后、把支撑回路推成自激振荡 —— 试过，连两吨的车都抖）。
-## 静止时单轮只有"车重 ÷ 轮数"，离上限很远，所以只有尖峰被削。
-var wheel_peak_force_car_weights := 1.0
+## 悬挂只调最大行程（格）和触底支撑倍率。统一使用初始整车质量 / 初始轮数，
+## 在进场时求出刚度、临界阻尼、自由长度；毁伤后保留原值。
+var wheel_suspension_travel := 1.2
+## 所有车轮使用同一倍率时，触底弹簧力总和 = 初始整车重量 × 倍率。
+var wheel_support_multiple := 8.0
 ## ── 轮胎力模型（移植自 nani_raycast_wheel.gd，MIT，见 reference/nani_raycast_wheel/）──
 ## 抓地倍率：轮胎力整体乘这个（1.0 = 原始）。想整体更粘/更滑就调它。
 var wheel_grip_factor := 1.0
@@ -123,13 +99,6 @@ var wheel_grip_factor := 1.0
 ## 小滑移时侧偏刚度 ≈ 载荷 × peak × stiff × shape，大滑移自动饱和（不会把车掀翻）。
 var wheel_lat_pacejka := [1.0, 10.0, 0.0, 1.35]
 var wheel_long_pacejka := [1.0, 10.0, 0.0, 1.65]
-## 阻尼系数 N·秒/格：压缩（往下压）和回弹（伸出去）可以不一样。
-## 参考值（想要"刚好不振荡"）：临界阻尼 c = 2 × √(刚度 × 单轮质量)，
-## 取它的 0.4~0.7 倍比较舒服；比临界大 = 发闷，小了 = 过坎会弹几下。
-var wheel_damper_compression := 4250.0
-var wheel_damper_relaxation := 6400.0
-## 支撑力上限 N：安全阀（避免极端情况下弹飞），正常行驶碰不到。
-var wheel_suspension_max_force := 30000.0
 ## ── 自定义整圈射线轮胎的手感旋钮（见 scripts/test_field.gd）─────────────────
 ## 这些是"每根轮轴各读自己那一份"的调参入口；测试场里的同名 `WHEEL_*` 常量现在只是
 ## **默认值**（部件文件没写这一行时才用）。除 `wheel_rays` 外都是浮点，且都允许 0（0 有特殊
@@ -564,30 +533,26 @@ func fire_interval_seconds() -> float:
 	return 60.0 / weapon_rpm
 
 
-## 悬挂参数：**零件固有（绝对值）** —— `wheel_stiffness`（N/格）、
-## `wheel_damper_compression/relaxation`（N·秒/格）、`wheel_suspension_max_force`（N）。
-##
-## 2026-10-14 试过一版"按车重自动算"（`wheel_ride_sag` / `wheel_damper_ratio` /
-## `wheel_support_multiple`）：比值确实能自适应，但**轻车被弹飞的根因不在比值**，
-## 而在"射线式悬挂会在临界高度上给出**一帧跳变**的力" —— 那个问题改用**低通滤波**
-## 解决（见 `TestField` 的 `SUSP_FORCE_FILTER_SECONDS`），所以这里回到零件固有参数。
-## （上面三个相对量还留在解析表里，但不参与计算；老文件写了也不会报错。）
-func resolved_suspension(_wheel_load: float, _wheel_mass: float) -> Dictionary:
-	# ⚠️ 只有**上限**跟车重走（安全阀），刚度/阻尼仍然是零件固有值：
-	# 实测（tools/probe_flat.gd，230 kg 的车）—— 把 `wheel_suspension_max_force` 当绝对值用
-	# 时，它是该车单轮静态负载的 **66 倍**，落地后**稳态**就在给这么大的力，小车直接飞，
-	# 低通滤波也无能为力（滤波只削尖峰，不动稳态）。所以：
-	#   * `wheel_stiffness` / `wheel_damper_*`：绝对值，**你调的手感，不动**；
-	#   * `wheel_support_multiple > 0`：上限 = 该轮静态负载 × 它（推荐 4）；
-	#   * 不写（=0）：退回 `wheel_suspension_max_force` 绝对值（老部件文件照旧）。
-	var max_force := wheel_suspension_max_force
-	if wheel_support_multiple > 0.0:
-		max_force = minf(max_force, _wheel_load * wheel_support_multiple)
+## 只由车辆生成流程调用一次：m = M初始 / N初始，k = 倍率 × m × g / 行程，c = 2√(km)。
+## 自由长度等于全行程，触底时长度为 0；静态压缩量 = 行程 / 倍率。
+## 返回值是独立的数值快照，不依赖后续的车重、存活轮数或部件定义变化。
+func resolved_suspension(
+	initial_mass: float, initial_wheel_count: int, gravity: float = GRAVITY_CUBES
+) -> Dictionary:
+	var corner_mass := maxf(0.001, initial_mass) / float(maxi(1, initial_wheel_count))
+	var travel := maxf(0.05, wheel_suspension_travel)
+	var multiple := maxf(1.0, wheel_support_multiple)
+	var wheel_load := corner_mass * maxf(0.0, gravity)
+	var bottom_force := wheel_load * multiple
+	var stiffness := bottom_force / travel
 	return {
-		"stiffness": wheel_stiffness,
-		"damper_c": wheel_damper_compression,
-		"damper_r": wheel_damper_relaxation,
-		"max_force": max_force,
+		"corner_mass": corner_mass,
+		"travel": travel,
+		"rest": travel,
+		"static_compression": travel / multiple,
+		"stiffness": stiffness,
+		"damping": 2.0 * sqrt(stiffness * corner_mass),
+		"max_force": bottom_force,
 	}
 
 
@@ -1067,25 +1032,14 @@ func _apply(key: String, value: String, line_no: int) -> void:
 			)
 		"wheel_radius":
 			wheel_radius = _parse_float(value, wheel_radius, line_no, key, 0.0)
-		"wheel_rest_length":
-			wheel_rest_length = _parse_float(value, wheel_rest_length, line_no, key, 0.0)
 		"wheel_suspension_travel":
-			wheel_suspension_travel = _parse_float(value, wheel_suspension_travel, line_no, key, 0.0)
-		"wheel_stiffness":
-			wheel_stiffness = _parse_float(value, wheel_stiffness, line_no, key, 0.0)
-		"wheel_ride_sag":
-			wheel_ride_sag = _parse_float(value, wheel_ride_sag, line_no, key, 0.0)
-		"wheel_damper_ratio":
-			wheel_damper_ratio = _parse_float(value, wheel_damper_ratio, line_no, key, 0.0)
+			wheel_suspension_travel = _parse_float(value, wheel_suspension_travel, line_no, key, 0.05)
 		"wheel_support_multiple":
-			wheel_support_multiple = _parse_float(
-				value, wheel_support_multiple, line_no, key, 0.0
-			)
-		"wheel_peak_force_car_weights":
-			# 单轮力硬截断（倍车重）。0 = 不截断
-			wheel_peak_force_car_weights = _parse_float(
-				value, wheel_peak_force_car_weights, line_no, key, 0.0
-			)
+			wheel_support_multiple = _parse_float(value, wheel_support_multiple, line_no, key, 1.0)
+		"wheel_rest_length", "wheel_stiffness", "wheel_ride_sag", "wheel_damper_ratio", \
+		"wheel_peak_force_car_weights", "wheel_suspension_max_force", \
+		"wheel_damper_compression", "wheel_damper_relaxation":
+			_warn("第 %d 行：%s 已弃用；悬挂请调 wheel_suspension_travel / wheel_support_multiple" % [line_no, key])
 		"wheel_grip_factor":
 			wheel_grip_factor = _parse_float(value, wheel_grip_factor, line_no, key, 0.0)
 		"wheel_lat_pacejka":
@@ -1100,18 +1054,6 @@ func _apply(key: String, value: String, line_no: int) -> void:
 				wheel_long_pacejka = nums
 			else:
 				_warn("第 %d 行：wheel_long_pacejka 需要 4 个数 peak stiff curve shape" % line_no)
-		"wheel_suspension_max_force":
-			wheel_suspension_max_force = _parse_float(
-				value, wheel_suspension_max_force, line_no, key, 0.0
-			)
-		"wheel_damper_compression":
-			wheel_damper_compression = _parse_float(
-				value, wheel_damper_compression, line_no, key, 0.0
-			)
-		"wheel_damper_relaxation":
-			wheel_damper_relaxation = _parse_float(
-				value, wheel_damper_relaxation, line_no, key, 0.0
-			)
 		"wheel_mu":
 			wheel_mu = _parse_float(value, wheel_mu, line_no, key, 0.0)
 		"wheel_mu_per_friction":
@@ -1284,7 +1226,7 @@ func _parse_float(value: String, fallback: float, line_no: int, key: String, min
 	var text := value.strip_edges()
 	if text.is_valid_float():
 		var parsed := float(text)
-		if parsed >= minimum:
+		if is_finite(parsed) and parsed >= minimum:
 			return parsed
 		_warn("第 %d 行：%s 不能小于 %s" % [line_no, key, str(minimum)])
 		return fallback

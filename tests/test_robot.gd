@@ -236,15 +236,8 @@ func test_wheel_parameters_live_in_the_part_file() -> void:
 		axle.wheel_steer_speed > 0.0,
 		"转向角速度应 > 0（车轮缓启动的速率）：%s" % axle.wheel_steer_speed
 	)
-	assert_true(axle.wheel_rest_length > 0.0, "悬挂静止压缩量应 > 0：%s" % axle.wheel_rest_length)
-	assert_true(axle.wheel_suspension_travel > 0.0, "悬挂行程应 > 0：%s" % axle.wheel_suspension_travel)
-	# 悬挂现在是**直接值**：刚度 N/格、阻尼 N·秒/格（不再有倍率/参考值那一套）
-	assert_true(axle.wheel_stiffness > 0.0, "弹簧刚度应 > 0：%s" % axle.wheel_stiffness)
-	assert_true(axle.wheel_damper_compression > 0.0, "压缩阻尼应 > 0：%s" % axle.wheel_damper_compression)
-	assert_true(axle.wheel_damper_relaxation > 0.0, "回弹阻尼应 > 0：%s" % axle.wheel_damper_relaxation)
-	assert_true(
-		axle.wheel_suspension_max_force > 0.0, "悬挂最大力应 > 0：%s" % axle.wheel_suspension_max_force
-	)
+	assert_true(axle.wheel_suspension_travel > 0.0, "悬挂行程应 > 0")
+	assert_almost_eq(axle.wheel_support_multiple, 8.0, 0.0001, "默认触底弹簧总力 = 8 倍初始车重")
 	assert_true(axle.wheel_radius >= 0.0, "半径 0 表示按模型自动算")
 	# 自定义轮胎的手感旋钮：都必须能从部件文件读到（用户直接调这些）
 	assert_true(axle.wheel_rays >= 3, "整圈射线条数应 >= 3：%s" % axle.wheel_rays)
@@ -273,10 +266,10 @@ func test_wheel_parameters_live_in_the_part_file() -> void:
 	)
 	assert_eq(bare.warnings.size(), 0, "不该有警告：%s" % str(bare.warnings))
 	assert_true(
-		bare.wheel_engine_force > 0.0 and bare.wheel_suspension_max_force > 0.0
+		bare.wheel_engine_force > 0.0 and bare.wheel_support_multiple > 0.0
 		and bare.wheel_max_speed > 0.0,
 		"默认轮子参数要能用：%s / %s / %s"
-		% [bare.wheel_engine_force, bare.wheel_suspension_max_force, bare.wheel_max_speed]
+		% [bare.wheel_engine_force, bare.wheel_support_multiple, bare.wheel_max_speed]
 	)
 	# 写歪了要各留一条警告，并且保留原值
 	var bad := PartDef.from_text(
@@ -325,9 +318,7 @@ func test_wheel_tuning_keys_are_parsed_and_guarded() -> void:
 		+ "wheel_rays = 12\nwheel_ray_slack = 0.1\nwheel_sus_sector = 0.7\n"
 		+ "wheel_slip_falloff = 0.15\nwheel_slip_ref = 30\nwheel_grip_gain = 1800\n"
 		+ "wheel_brake_gain = 5000\nwheel_roll_gain = 1.5\nwheel_mu_per_friction = 0.05\n"
-		+ "wheel_mu_max = 3.0\nwheel_stiffness = 80000\nwheel_damper_compression = 1200\n"
-		+ "wheel_damper_relaxation = 1800\nwheel_rest_length = 0.2\n"
-		+ "wheel_suspension_travel = 0.25\nwheel_suspension_max_force = 40000\n"
+		+ "wheel_mu_max = 3.0\nwheel_suspension_travel = 0.25\nwheel_support_multiple = 12\n"
 		+ "wheel_anti_roll_tilt = 10\nwheel_anti_roll_damping = 0.7\n"
 		+ "wheel_steer_speed = 120\nwheel_steer_return_speed = 300\n",
 		"res://data/parts/test_wheel_tuned.part.txt"
@@ -343,13 +334,8 @@ func test_wheel_tuning_keys_are_parsed_and_guarded() -> void:
 	assert_almost_eq(tuned.wheel_roll_gain, 1.5, 0.0001, "滚动阻力")
 	assert_almost_eq(tuned.wheel_mu_per_friction, 0.05, 0.0001, "换算比例")
 	assert_almost_eq(tuned.wheel_mu_max, 3.0, 0.0001, "抓地上限")
-	# 悬挂是直接值：写多少就是多少
-	assert_almost_eq(tuned.wheel_stiffness, 80000.0, 0.0001, "弹簧刚度 N/格")
-	assert_almost_eq(tuned.wheel_damper_compression, 1200.0, 0.0001, "压缩阻尼 N·秒/格")
-	assert_almost_eq(tuned.wheel_damper_relaxation, 1800.0, 0.0001, "回弹阻尼 N·秒/格")
-	assert_almost_eq(tuned.wheel_rest_length, 0.2, 0.0001, "悬挂自由长度（格）")
-	assert_almost_eq(tuned.wheel_suspension_travel, 0.25, 0.0001, "行程上限（格）")
-	assert_almost_eq(tuned.wheel_suspension_max_force, 40000.0, 0.0001, "支撑力上限")
+	assert_almost_eq(tuned.wheel_suspension_travel, 0.25, 0.0001, "最大行程（格）")
+	assert_almost_eq(tuned.wheel_support_multiple, 12.0, 0.0001, "触底弹簧总力倍率")
 	assert_almost_eq(tuned.wheel_anti_roll_tilt_deg, 10.0, 0.0001, "防翻倾角（度）")
 	assert_almost_eq(tuned.wheel_anti_roll_damping, 0.7, 0.0001, "防翻阻尼")
 	assert_almost_eq(tuned.wheel_steer_speed, 120.0, 0.0001, "打方向角速度（度/秒）")
@@ -408,50 +394,6 @@ func test_ring_rays_skip_the_suspension_sector_under_the_wheel() -> void:
 	)
 	assert_false(TestField.ring_ray_belongs_to_suspension(fwd, down, 0.5), "正前方不能跳")
 	assert_false(TestField.ring_ray_belongs_to_suspension(sus, down, 0.5), "正上方不能跳")
-
-
-## 悬挂现在是"一个物理量一个参数"：刚度 N/格直接填，静止压缩量 = 负载 ÷ 刚度（算出来的）。
-## 硬点按它抬，所以静止时轮心正好落在作者摆的位置（轮胎底面贴地、不入地）。
-## 这条测试盯的就是"硬点用的压缩量 == 弹簧真正的平衡位置"。
-func test_wheel_hub_keeps_the_authored_ride_height() -> void:
-	var rest := 0.15
-	for wheel_load: float in [400.0, 1972.0, 8000.0]:
-		for stiffness: float in [20000.0, 62000.0, 250000.0, 2480000.0]:
-			var settled := wheel_load / stiffness        # 弹簧平衡位置（纯物理）
-			var assumed := TestField.compression_at_rest(wheel_load, stiffness, rest)
-			if settled > rest:
-				# 软到压穿：模型会夹在 `rest`（不然轮心会跑到硬点上面去）
-				assert_almost_eq(assumed, rest, 0.0001, "压穿时夹在 rest")
-				continue
-			if settled < 0.005:
-				# 硬到几乎压不动：模型会夹在最小值 0.005 格（3 毫米），别让轮心跑到作者位上面去
-				assert_almost_eq(assumed, 0.005, 0.0001, "压不动时夹在下限 0.005 格")
-				continue
-			assert_almost_eq(
-				assumed, settled, 0.0005,
-				"负载 %s / 刚度 %s：硬点用的压缩量要等于弹簧平衡位置" % [wheel_load, stiffness]
-			)
-	# 一台车的实际数（举例）：608 kg / 8 轮 = 76 kg → 重量 76 kg × 19.6 格/秒² = 1490 N
-	assert_almost_eq(
-		TestField.compression_at_rest(1490.0, 62000.0, rest), 0.024, 0.001, "62000 刚度 → 压 0.024 格"
-	)
-	# 2480000 刚度下物理压缩量只有 0.0006 格 → 会被夹到下限 0.005（等于几乎压不动）
-	assert_almost_eq(
-		TestField.compression_at_rest(1490.0, 2480000.0, rest), 0.005, 0.0001, "硬到夹下限"
-	)
-
-
-## 行程够不够：压到行程就到底、支撑力不再涨（车身贴地走、看着像"入地"）。
-## 这条把判据钉住 —— 用户踩过：行程只有静态下沉的几倍，8 个轮子里 4 个卡在行程上。
-## （下面的 0.3 / 0.06 只是"一组数"，验的是判据 = 5 倍，不是某台车的实际值。）
-func test_suspension_travel_must_be_several_times_the_static_sag() -> void:
-	# 静态下沉 0.06 格（62000 刚度、3724 N 负载）时，0.3 的行程只有 5 倍 → 太短
-	assert_true(TestField.travel_is_too_short(0.3, 0.06), "5 倍以内要判太短（用户那套就是 0.3/0.06）")
-	assert_true(TestField.travel_is_too_short(0.2, 0.06), "3 倍更要判太短")
-	assert_false(TestField.travel_is_too_short(0.6, 0.06), "10 倍够用")
-	assert_false(TestField.travel_is_too_short(1.2, 0.06), "20 倍（软悬挂推荐）够用")
-	# 硬悬挂（静态只压 0.005）时短行程也没问题：底盘几乎不动
-	assert_false(TestField.travel_is_too_short(0.3, 0.005), "压不动就不需要长行程")
 
 
 ## 判定射线挪到**轮胎外侧**：`outboard_shift()` 要按"轮心相对底盘中心在轴的哪一侧"
@@ -648,34 +590,6 @@ func test_world_calibration_is_consistent() -> void:
 	assert_almost_eq(
 		TestField.CUBE_METERS, PartDef.CUBE_METERS, 0.0001,
 		"测试场（速度表 / 卡钳）必须用同一个标定"
-	)
-
-
-## 悬挂参数就是**零件固有绝对值**（刚度/阻尼/上限都照文件里的数），不按车重缩放 ——
-## 轻车被弹飞是**数值稳定性**问题（显式阻尼的稳定条件 dt < 2m/c，小车 m 小会翻过界），
-## 现在改用**隐式阻尼**（Godot/Bullet 那套）从根上解决，见 `TestField._apply_wheel()`。
-func test_suspension_params_are_intrinsic() -> void:
-	var library := _library()
-	var axle: PartDef = library.get_def("wheel_axle_2x2")
-	if axle == null:
-		return
-	var gravity := PartDef.GRAVITY_CUBES
-	var heavy_load := 2270.0 * gravity / 8.0    # 你那台 111：2.27 吨 / 8 轮
-	var light_load := 230.0 * gravity / 4.0     # 那台未命名小车：230 kg / 4 轮
-	var heavy := axle.resolved_suspension(heavy_load, heavy_load / gravity)
-	var light := axle.resolved_suspension(light_load, light_load / gravity)
-	assert_almost_eq(
-		float(heavy["stiffness"]), float(light["stiffness"]), 0.001, "刚度是零件固有值，不随车重变"
-	)
-	assert_almost_eq(
-		float(heavy["damper_c"]), float(light["damper_c"]), 0.001, "阻尼也是零件固有值"
-	)
-	assert_almost_eq(
-		float(light["max_force"]), axle.wheel_suspension_max_force, 1.0,
-		"支撑力上限就是文件里的绝对值（不按车重缩放）"
-	)
-	assert_true(
-		TestField.SUSP_FORCE_FILTER_SECONDS >= 0.0, "低通滤波时间常数存在（0 = 关掉滤波）"
 	)
 
 

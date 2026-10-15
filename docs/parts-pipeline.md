@@ -468,15 +468,14 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
     路缘、坡脚时"感觉不到"，越野很差。（早年试过"一簇 VehicleWheel3D"和"视觉去穿透"，都不划算、
     已回滚 —— 那次结论就是"要越野得自己写轮胎模型"，这次做了。）
   - **怎么算**（三层，`_apply_wheel()`）：
-    1. **悬挂**：从"硬点在轮心上方 (rest − sag) 处"沿底盘**下方**打一条射线（长度 = rest + 半径 +
-      行程）。够得着地面就按 `压缩量 = rest + 半径 − d` 算，轮心 = 硬点 + 下 × (rest − 压缩量) ——
+    1. **悬挂**：从"硬点在轮心上方 (rest − sag) 处"沿底盘**下方**打一条射线（长度 = rest + 半径）。够得着地面就按 `压缩量 = rest + 半径 − d` 算，轮心 = 硬点 + 下 × (rest − 压缩量) ——
     **轮胎网格挂在轮心节点上，所以视觉上跟着物理悬挂上下走**；静止时压缩量 = **负载 ÷ 刚度**
-      （纯物理，跟着车重走），轮胎底面**贴地不入地**。支撑力 = k × 压缩量 + c × 压缩速度，作用在接触点上
+      （= 行程 / 触底倍率），轮胎底面**贴地不入地**。支撑力 = k × 压缩量 + c × 压缩速度，作用在接触点上
       （带力矩 → 压弯悬挂时车身会侧倾）。
     2. **整圈 16 射线**：从当前轮心朝轮平面里的圆周打 16 条等距射线（每 22.5°、长度 = 半径 + 0.04），
        **跟"下"夹角小于 60° 的那一片跳过**（那一片归悬挂管，不然平地上十几条射线并联，力翻十几倍、
        车会被弹飞 —— 第一版就是这么飞起来的）。剩下的方向负责探台阶/路缘/坡脚：按"压缩量 = 半径 −
-       距离"给径向弹簧力，作用在各自的接触点上（台阶顶到轮胎前缘时会顺带给车头抬头力矩，这是爬上去的关键）。
+       距离"收集接触深度，与主射线合并，选最深接触沿真实表面法线施力，每轮只计算一次。
        ⚠️ **判据的符号踩过坑**（2026-10-12 修）：跳过必须用 `dir · down`（下），当时写成了
        `dir · (-down)` = `dir · up`，于是跳掉的是**朝上**那一扇区、正下方那 5 条全留在场上 ——
        平地上每个轮子都多出 2~3 个接触点（正下方那条 + 压缩大了以后的 ±22.5°），支撑刚度 / 阻尼 /
@@ -494,19 +493,21 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
        不给这一层 85 格/秒打方向就翻车（实测倾角 141°）。腾空时不生效。
   - **参数从哪来**：**全部**在轮轴自己的 `.part.txt` 里（`_add_wheel()` 建节点时读一次，
     每帧只查抄好的数值）。半径 = 轮胎盒子。
-    **悬挂是"一个物理量一个参数"，没有倍率/参考值那一套**（2026-10-12 按用户要求拆掉）：
-    `wheel_stiffness` = 弹簧刚度（N/格，**直接填**）、`wheel_damper_compression` /
-    `wheel_damper_relaxation` = 阻尼系数（N·秒/格，**直接填**）、`wheel_suspension_travel` = 行程上限（格）。
-    **静止压缩量 = (整车重量 ÷ 轮数) ÷ 刚度**，是算出来的（车重了自然压得多）；
-    悬挂硬点按它反推，所以静止时轮胎底面正好落在作者摆的位置（夹在 0.005~`rest` 格之间）。
-    ⚠️ **行程必须配套**：压到 `wheel_suspension_travel` 就"到底"，之后支撑力停在 `k × 行程`
-    上不再涨 —— 到底之后车再往下就压不动，**车身贴着地面走、轮胎看着像"入地"**。
-    实测踩过：刚调到"软"（刚度 62000 → 静止压 0.06 格）时行程还是老的 0.3（正好 5 倍），
-    静止时 8 个轮子里 **4 个卡在 0.30 上限**，表现就是"经常莫名其妙入地、还很诡异"
-    （而且 `wheel_rays = 0` 一样入地 —— 平地上整圈射线本来就不参与，所以这跟射线方向无关）。
-    判据与告警：`TestField.travel_is_too_short()`（行程 ≤ 静态压缩量 × 5 就 `push_warning`），
-    软悬挂建议 **15~20 倍**；`wheel_suspension_max_force` 也要高于 `k × 行程`，否则"调软"会被它吃掉。
-    断言：`test_suspension_travel_must_be_several_times_the_static_sag`。
+    **悬挂只调两项**：`wheel_suspension_travel`（最大避震行程，格，默认 1.2）和
+    `wheel_support_multiple`（所有车轮触底弹簧力之和 / 初始整车重量，默认 8）。
+    进场时保存初始质量 `M`、初始轮数 `N`、重力 `g`，每轮 `m = M/N`；
+    `k = 倍率 × m × g / 行程`，`c = 2√(km)`（临界阻尼），自由长度等于最大行程。
+    静态压缩量为 `行程 / 倍率`，硬点按这个量补偿以保留建造时的轮心高度。
+    上述平衡量不含 `data/handling.txt` 的额外下压力；当前 `downforce = 0.5` 时，
+    平地总静压约为 `1.5 × 行程 / 倍率`，这不会改变进场时计算的刚度和阻尼。
+    多射线只探测接触；每轮合并为一次弹簧、阻尼和轮胎力，离地清空接触载荷。
+    弹簧与阻尼合力限制在 `[0, 单轮触底弹簧力]`；倍率定义仅指触底时的弹簧弹力。
+    毁伤更新刚体质量、重心并移除坏轮，**不会重算幸存轮的刚度、阻尼、行程和限力**。
+    重新进场才生成新的快照；玩家与靶子共用初始化流程。
+    旧 `wheel_stiffness`、`wheel_damper_*`、`wheel_rest_length`、`wheel_ride_sag`、
+    `wheel_damper_ratio`、`wheel_suspension_max_force`、`wheel_peak_force_car_weights`
+    只给出弃用提示，不再参与悬挂计算。不同轮轴使用不同倍率时，总倍率为这些倍率的平均值。
+    测试见 `tests/test_suspension.gd`、`tools/test_suspension_physics.gd`。
     `scripts/test_field.gd` 顶上的 `WHEEL_*` / `ANTI_ROLL_*` 常量现在只是**默认值**
     （部件文件没写那一行时才用）。
   - **抓地力（mu）和 `wheel_friction` 的关系**（用户问过"调 5000 为什么还在滑"）：
@@ -528,9 +529,7 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
     本来就不是慢速能上的高度）。
   - 手感旋钮（都在 `data/parts/wheel2x2/wheel_axle_2x2.part.txt`，调参顺序建议照这个来）：
     `wheel_mu`（抓地力，**最要紧的一个**，1.8 左右开始明显"粘地"）→
-    `wheel_stiffness`（悬挂软硬，N/格：**越大越硬**；想要静止压 0.06 格就写"负载 ÷ 0.06"）→
-    `wheel_damper_compression` / `wheel_damper_relaxation`（阻尼，N·秒/格；临界阻尼
-    c = 2√(刚度 × 单轮质量)，取它的 0.5~1.5 倍）→
+    `wheel_suspension_travel`（行程）/ `wheel_support_multiple`（触底倍率，默认 8；阻尼自动计算）→
     `wheel_anti_roll_tilt`（防翻力度，★**单位是度**，写 0 = 关掉防翻）/ `wheel_anti_roll_damping` →
     `wheel_engine_force`（动力）→ `wheel_slip_falloff` / `wheel_slip_ref`（横向滑掉多少摩擦）、
     `wheel_grip_gain` / `wheel_brake_gain` / `wheel_roll_gain`（力的增益）、
@@ -542,8 +541,6 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
     `TestField.outboard_shift()` + `shift_along_local_x()` 按"轮子在轴的哪一侧"算，
     实测 8 个轮子全部朝外挪 0.40 格（离车心 3.41 → 3.81）。断言：
     `test_ray_offset_goes_outboard_on_both_sides`）。
-    `wheel_suspension_travel`（★ 行程，**至少 5 倍静态压缩量**，软悬挂 15~20 倍；
-    太短会"到底"→ 车身贴地走、轮胎看着入地）和 `wheel_suspension_max_force`（上限要高于 k × 行程）。
     防翻是整车效应：**取第一个轮轴**的 `wheel_anti_roll_*` 那一对值。
   - 顺带记住两个量测教训：① 判"轮胎穿模"**不能**用世界轴对齐包围盒（轮胎被 yaw 过时盒子会
     虚胖：3.5 宽的轮胎能量出 2.77 高），要用"从轮心朝圆周打射线，看有没有比半径更近的面"；
@@ -600,9 +597,9 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
       # 滑移衰减 / 力的增益 / 整圈射线 / 悬挂 / 防翻
       wheel_slip_falloff / wheel_slip_ref / wheel_grip_gain / wheel_brake_gain / wheel_roll_gain
       wheel_rays / wheel_ray_slack / wheel_sus_sector
-      # 悬挂：全是直接值（N/格、N·秒/格、格），没有倍率/参考值
-      wheel_stiffness / wheel_damper_compression / wheel_damper_relaxation
-      wheel_rest_length / wheel_suspension_travel / wheel_suspension_max_force
+      # 悬挂：进场时按初始车重和轮数求出刚度、临界阻尼，毁伤不重算
+      wheel_suspension_travel = 1.2   # 格
+      wheel_support_multiple = 8     # 总触底弹簧力 / 初始车重
       wheel_anti_roll_tilt / wheel_anti_roll_damping      # 整车共用：取第一个轮轴（tilt 单位 = 度）
 
   `_add_wheel()` 建节点时读一次（每帧只抄下来的数值，不查表）；解析失败保留默认值并告警，
