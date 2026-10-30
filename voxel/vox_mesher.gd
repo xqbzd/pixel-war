@@ -24,12 +24,19 @@ const FACES: Array[Dictionary] = [
 
 
 ## 返回 {mesh: ArrayMesh, quads: int}
+##
+## ⚠️ 只遍历**实心范围**（`VoxVolume.solid_lo()` / `solid_hi()`），不遍历整块体积：
+## 武器零件是"3×3×3 格 = 48³"的体积，而枪管/底座只占中间一小块 —— 按整块扫的话
+## 一把枪的网格要 60 万次取值（实测 0.6 秒），枪一多就是进场卡十几秒。
 static func build(volume: VoxVolume, voxel_size: float, origin := Vector3.ZERO) -> Dictionary:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var quads := 0
-	for face in FACES:
-		quads += _emit_face(volume, st, face, voxel_size, origin)
+	if volume.has_solid():
+		var lo := volume.solid_lo()
+		var hi := volume.solid_hi()
+		for face in FACES:
+			quads += _emit_face(volume, st, face, voxel_size, origin, lo, hi)
 	return {"mesh": st.commit(), "quads": quads}
 
 
@@ -42,7 +49,13 @@ static func axis_of(dir: Vector3i) -> int:
 
 
 static func _emit_face(
-	volume: VoxVolume, st: SurfaceTool, face: Dictionary, voxel_size: float, origin: Vector3
+	volume: VoxVolume,
+	st: SurfaceTool,
+	face: Dictionary,
+	voxel_size: float,
+	origin: Vector3,
+	lo: Vector3i,
+	hi: Vector3i
 ) -> int:
 	var n: Vector3i = face["n"]
 	var u: Vector3i = face["u"]
@@ -52,19 +65,25 @@ static func _emit_face(
 	var v_axis := axis_of(v)
 	var du: int = volume.size[u_axis]
 	var dv: int = volume.size[v_axis]
-	var dd: int = volume.size[d_axis]
 	var positive: bool = n[d_axis] > 0
 	var step := 1 if positive else -1
+	# 这一轴只扫实心范围（`hi` 不含）：空层整层跳过，不用建 mask
+	var d_from: int = lo[d_axis]
+	var d_to: int = hi[d_axis]
+	var u_from: int = lo[u_axis]
+	var u_to: int = hi[u_axis]
+	var v_from: int = lo[v_axis]
+	var v_to: int = hi[v_axis]
 
 	var mask := PackedInt32Array()
 	mask.resize(du * dv)
 	var quads := 0
 
-	for d in range(dd):
+	for d in range(d_from, d_to):
 		var any := false
 		mask.fill(0)
-		for j in range(dv):
-			for i in range(du):
+		for j in range(v_from, v_to):
+			for i in range(u_from, u_to):
 				var value := _sample(volume, d_axis, d, u_axis, i, v_axis, j)
 				if value == VoxVolume.EMPTY:
 					continue
@@ -74,7 +93,8 @@ static func _emit_face(
 				any = true
 		if any:
 			quads += _emit_slab(
-				volume, st, mask, du, dv, d, face, voxel_size, origin
+				volume, st, mask, du, dv, d, face, voxel_size, origin,
+				u_from, u_to, v_from, v_to
 			)
 	return quads
 
@@ -88,21 +108,25 @@ static func _emit_slab(
 	d: int,
 	face: Dictionary,
 	voxel_size: float,
-	origin: Vector3
+	origin: Vector3,
+	u_from: int,
+	u_to: int,
+	v_from: int,
+	v_to: int
 ) -> int:
 	var used := PackedByteArray()
 	used.resize(du * dv)
 	var quads := 0
-	for j in range(dv):
-		for i in range(du):
+	for j in range(v_from, v_to):
+		for i in range(u_from, u_to):
 			var value := mask[j * du + i]
 			if value == VoxVolume.EMPTY or used[j * du + i] == 1:
 				continue
 			var w := 1
-			while i + w < du and mask[j * du + i + w] == value and used[j * du + i + w] == 0:
+			while i + w < u_to and mask[j * du + i + w] == value and used[j * du + i + w] == 0:
 				w += 1
 			var h := 1
-			while j + h < dv:
+			while j + h < v_to:
 				var fits := true
 				for k in range(w):
 					var mi := (j + h) * du + i + k

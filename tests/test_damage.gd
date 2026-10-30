@@ -196,7 +196,7 @@ func test_wheel_tire_gets_its_own_hit_box() -> void:
 		(
 			"name = 轮子受击测试\n"
 			+ "part = core 0 0 0 0 0 0\n"
-			+ "part = wheel_axle_2x2 2 0 0 0 0 0\n"
+			+ "part = toy_wheel_2x2 2 0 0 0 0 0\n"
 		),
 		"user://wheel_hit_probe.vehicle.txt"
 	)
@@ -204,44 +204,174 @@ func test_wheel_tire_gets_its_own_hit_box() -> void:
 	var body := StaticBody3D.new()
 	var rig := VehicleRig.new()
 	rig.setup(vehicle, library, body, body, false, Vector3.ZERO)
-	var axle: PartDef = library.get_def("wheel_axle_2x2")
+	var axle: PartDef = library.get_def("toy_wheel_2x2")
 	assert_true(axle != null, "缺少轮轴部件")
 	if axle == null:
 		body.free()
 		return
-	# 车体上：核心 1 个 + 轮轴本体 1 个（轮胎**不在**这里，它不能参与物理碰撞）
-	assert_eq(rig.shapes.size(), 2, "车体上只有本体盒：%d" % rig.shapes.size())
-	assert_eq(rig._shape_part, [0, 1], "车体的 shape 表：核心、轮轴本体")
-	# 受击盒 body 上：轮轴的轮胎 1 个
-	assert_eq(rig._hit_shapes.size(), 1, "受击盒 body 上应该只有轮胎那一个")
-	assert_eq(rig._hit_shape_part, [1], "轮胎那一下算在轮轴头上")
-	var body_size: Vector3 = (rig.shapes[1].shape as BoxShape3D).size
-	var tire_size: Vector3 = (rig._hit_shapes[0].shape as BoxShape3D).size
-	assert_vec_almost_eq(body_size, axle.body_bounds().size, 0.001, "车体上那个是本体包围盒")
+	# 车体物理碰撞 = 每个零件一个盒子（真实外形；受击仍走 hitboxes 的 trimesh）
+	# 车体物理碰撞 = 全部并进合并盒（核心 / 轮轴都是不动的部件；只有勾了
+	# `weapon_swivel_collider` 的炮塔才单独建盒）
+	assert_true(rig.shapes.is_empty(), "没有零件需要独立碰撞盒：%d" % rig.shapes.size())
+	assert_true((rig._merged_shapes as Array).size() >= 1, "方块被合并成盒子")
+	# 受击盒 body 上按**空间分块**挂 trimesh（掉零件只重建受影响的块，不重建整车）
+	assert_true(rig._hit_shapes.size() >= 1, "受击盒至少挂了一块 trimesh")
+	assert_eq(rig._hit_shapes.size(), rig._chunk_shapes.size(), "块表和张数对得上")
+	for chunk_shape in rig._hit_shapes:
+		assert_true(chunk_shape.shape is ConcavePolygonShape3D, "每块都是凹面体")
+	assert_eq(rig._hit_shape_part.size(), 3, "受击盒记了 3 个盒：核心本体、轮轴本体、轮胎")
+	assert_eq(rig._hit_shape_part, [0, 1, 1], "轮胎那一下算在轮轴头上")
+	var tire_box: AABB = rig._hit_box[2]
+	var tire_size: Vector3 = tire_box.size
+	var body_box: AABB = rig._hit_box[1]
 	var sub: VoxVolume = axle.sub_model_volume()
 	var tight := PartDef.tight_bounds(sub, axle.sub_model_offset(), Vector3.ONE)
-	assert_vec_almost_eq(tire_size, tight.size, 0.001, "受击盒 = 轮胎自己的包围盒")
+	assert_vec_almost_eq(tire_size, tight.size, 0.001, "轮胎盒 = 轮胎自己的包围盒")
+	assert_vec_almost_eq(body_box.size, axle.body_bounds().size, 0.001, "本体盒 = 部件本体包围盒")
 	# 关键：轮胎盒不能是零尺寸，也不能只是本体盒的复制（那就等于没加）。
-	# 2x2 轮轴的轮胎实际是 0.8125 × 2 × 2 格（轮平面 2×2、宽度 13 体素），所以
-	# 判据按"每个轴都有实际厚度"来写，不写死 1.0。
 	assert_true(
 		tire_size.x > 0.4 and tire_size.y > 1.0 and tire_size.z > 1.0,
 		"轮胎盒要有实际大小：%s" % str(tire_size)
 	)
-	assert_true(tire_size != body_size, "轮胎盒应该和本体盒不同：%s vs %s" % [str(tire_size), str(body_size)])
-	# 打中轮胎那个 shape，结算要算到**这个轮轴**头上
-	assert_eq(rig.part_index_of_hit(rig.hitboxes.get_rid(), 0), 1, "轮胎的 shape 映射回轮轴")
-	assert_eq(rig.part_index_of_hit(body.get_rid(), 1), 1, "车体上的本体盒也映射回轮轴")
+	assert_true(tire_size != body_box.size, "轮胎盒应该和本体盒不同：%s vs %s" % [str(tire_size), str(body_box.size)])
+	# 命中点落在轮胎盒里 → 算到**这个轮轴**头上；落在核心盒里 → 算核心
+	assert_eq(
+		rig.part_index_of_hit(rig.hitboxes.get_rid(), 0, tire_box.get_center()), 1, "轮胎上算轮轴"
+	)
+	assert_eq(
+		rig.part_index_of_hit(rig.hitboxes.get_rid(), 0, (rig._hit_box[0] as AABB).get_center()), 0,
+		"核心盒上算核心"
+	)
 	# 受击盒 body 必须**不参与物理碰撞**：专用层 + 掩码 0
 	assert_eq(rig.hitboxes.collision_layer, 4, "受击盒在专用层 4")
 	assert_eq(rig.hitboxes.collision_mask, 0, "受击盒掩码 0（谁都不碰）")
 	assert_eq(rig.hitboxes.collision_layer, VehicleRig.HITBOX_LAYER, "层号用常量，别对不上")
 	# 打掉这个零件之后，盒子都还在（只禁用不删除：删了后面 shape 下标会往前挪）
 	rig.apply_damage(1, 99999.0)
-	assert_eq(rig.shapes.size(), 2, "车体的盒子不删除（下标要稳）")
-	assert_eq(rig._hit_shapes.size(), 1, "受击盒也不删除")
+	rig.flush_visuals()
+	assert_true(rig.shapes.is_empty(), "没有零件需要独立碰撞盒")
+	assert_true(rig._hit_shapes.size() >= 1, "受击盒的 trimesh 还在（只重建受影响的块）")
+	# 打掉之后，打在那个位置应该已经不算这个零件了
+	assert_eq(
+		rig.part_index_of_hit(rig.hitboxes.get_rid(), 0, tire_box.get_center()), -1,
+		"零件没了就不再受击"
+	)
 	body.free()
 
 
 
 
+
+## 瞄点要**跟着残骸走**：零件掉了之后 `alive_centre_local()` 必须挪到剩下的零件上，
+## 不能还停在原来整车的中心（用户 2026-10-19 报的"打残的对手瞄不中"）。
+func test_aim_point_follows_destroyed_parts() -> void:
+	var library := _library()
+	var vehicle := VehicleDef.from_text(
+		(
+			"name = 瞄点测试\n"
+			+ "part = core 0 0 0 0 0 0\n"
+			+ "part = toy_wheel_2x2 3 0 0 0 0 0\n"
+		),
+		"user://aim_centre_probe.vehicle.txt"
+	)
+	var body := StaticBody3D.new()
+	var rig := VehicleRig.new()
+	rig.setup(vehicle, library, body, body, false, Vector3.ZERO)
+	var full: Vector3 = rig.alive_centre_local()
+	var core_box: AABB = rig.part_box(rig.state.core_index)
+	# 把轮轴打掉 -> 只剩核心，视觉中心必须回到核心盒中心
+	for i in rig.state.part_count():
+		if i == rig.state.core_index:
+			continue
+		if rig.part_alive(i):
+			rig.apply_damage(i, float(rig.state.hp[i]))
+	rig.flush_visuals()
+	var after: Vector3 = rig.alive_centre_local()
+	assert_eq(rig.state.alive_count(), 1, "只剩核心")
+	assert_vec_almost_eq(after, core_box.get_center(), 0.001, "只剩核心时瞄点到核心盒中心")
+	assert_true(
+		full.distance_to(after) > 0.5,
+		"打掉偏在一侧的零件后瞄点必须挪动：%s -> %s" % [str(full), str(after)]
+	)
+	body.free()
+
+## 炮塔的"支架独立碰撞盒"开关：默认关（并进合并盒）；打开才单独一个 shape。
+func test_swivel_collider_flag() -> void:
+	var library := _library()
+	var def := library.get_def("light_mg_x2")
+	assert_true(def != null, "缺少 light_mg_x2")
+	if def == null:
+		return
+	# 默认（部件文件里写的是 false）：炮塔也并进合并盒，没有独立 shape
+	assert_true(not def.weapon_swivel_collider, "两种机枪默认都不单独建盒")
+	var vehicle := VehicleDef.from_text(
+		(
+			"name = 炮塔碰撞盒测试\n"
+			+ "part = core 0 0 0 0 0 0\n"
+			+ "part = light_mg_x2 0 1 0 0 0 0\n"
+		),
+		"user://swivel_probe.vehicle.txt"
+	)
+	var body := StaticBody3D.new()
+	var rig := VehicleRig.new()
+	rig.setup(vehicle, library, body, body, false, Vector3.ZERO)
+	assert_true(rig.shapes.is_empty(), "默认没有独立碰撞盒：%d" % rig.shapes.size())
+	assert_true((rig._merged_shapes as Array).size() >= 1, "炮塔底座并进了合并盒")
+	body.free()
+	# 打开开关（模拟以后的复杂炮塔）：必须单独一个独立盒，而且对应炮塔零件
+	def.weapon_swivel_collider = true
+	var body2 := StaticBody3D.new()
+	var rig2 := VehicleRig.new()
+	rig2.setup(vehicle, library, body2, body2, false, Vector3.ZERO)
+	assert_eq(rig2.shapes.size(), 1, "打开开关后有一个独立盒：%d" % rig2.shapes.size())
+	assert_eq(rig2._shape_part, [1], "独立盒对应炮塔零件（下标 1）")
+	body2.free()
+
+## 命中点反查：格子快路径必须和"暴力扫所有盒子"给出同样的结果。
+func test_part_lookup_fast_path_matches_brute_force() -> void:
+	var library := _library()
+	var vehicle := VehicleDef.from_text(
+		(
+			"name = 反查测试\n"
+			+ "part = core 0 0 0 0 0 0\n"
+			+ "part = cube_full 2 0 0 0 0 0\n"
+			+ "part = cube_full 2 1 0 0 0 0\n"
+			+ "part = toy_wheel_2x2 4 0 0 0 0 0\n"
+		),
+		"user://lookup_probe.vehicle.txt"
+	)
+	var body := StaticBody3D.new()
+	var rig := VehicleRig.new()
+	rig.setup(vehicle, library, body, body, false, Vector3.ZERO)
+	assert_true(not (rig.get("_cell_part") as Dictionary).is_empty(), "格子表建起来了")
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 12345
+	var checked := 0
+	var mismatched := 0
+	for _i in 200:
+		# 在所有零件盒的范围内随机撒点（含盒子表面附近）
+		var i := rng.randi_range(0, rig.state.part_count() - 1)
+		var box: AABB = rig.part_box(i)
+		var point := Vector3(
+			rng.randf_range(box.position.x - 0.1, box.end.x + 0.1),
+			rng.randf_range(box.position.y - 0.1, box.end.y + 0.1),
+			rng.randf_range(box.position.z - 0.1, box.end.z + 0.1)
+		)
+		var fast: int = rig.call("_part_at_local", point)
+		# 暴力：所有盒子里"中心最近"的那个活零件
+		var brute := -1
+		var best := INF
+		for j in rig.state.part_count():
+			if not rig.part_alive(j):
+				continue
+			var candidate: AABB = (rig.part_box(j) as AABB).grow(0.02)
+			if candidate.has_point(point):
+				var distance: float = candidate.get_center().distance_squared_to(point)
+				if distance < best:
+					best = distance
+					brute = j
+		checked += 1
+		if brute >= 0 and fast != brute:
+			mismatched += 1
+	assert_eq(mismatched, 0, "快路径和暴力结果一致（查了 %d 个点）" % checked)
+	body.free()

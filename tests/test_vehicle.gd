@@ -41,7 +41,7 @@ func test_actual_bounds_catches_the_wheels_below_the_declared_box() -> void:
 		(
 			"name = 贴地测试\n"
 			+ "part = core 0 2 0 0 0 0\n"
-			+ "part = wheel_axle_2x2 2 0 0 0 0 0\n"
+			+ "part = toy_wheel_2x2 2 0 0 0 0 0\n"
 		),
 		"user://ground_probe.vehicle.txt"
 	)
@@ -86,8 +86,8 @@ func test_part_files_load_without_warnings() -> void:
 	assert_eq(library.warnings.size(), 0, "部件文件应无警告：%s" % str(library.warnings))
 	assert_eq(
 		library.ids().size(),
-		7,
-		"应有 7 个可放置部件：4 个解析形状 + 车轮 + 轻机枪 + 核心（轮体只是浮在轮轴上的模型，不是部件）"
+		10,
+		"应有 10 个可放置部件：4 个解析形状 + 两种轮胎 + 三种机枪 + 核心（轮体只是浮在轮轴上的模型，不是部件）"
 	)
 
 
@@ -295,12 +295,12 @@ func test_save_reload_round_trip() -> void:
 func test_wheel_vehicle_survives_floor_shift_on_load() -> void:
 	var library := _library()
 	var cube := library.get_def("cube_full")
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	# 一辆小车的布局：轮子在最底排（cell y = 0），车身在它上面
 	var parts := [
 		{"part_id": "cube_full", "cell": Vector3i(0, 1, 0), "basis": Basis()},
 		{"part_id": "cube_full", "cell": Vector3i(0, 2, 0), "basis": Basis()},
-		{"part_id": "wheel_axle_2x2", "cell": Vector3i(1, 0, 0), "basis": Basis()},
+		{"part_id": "toy_wheel_2x2", "cell": Vector3i(1, 0, 0), "basis": Basis()},
 	]
 	# 轮子的网格会往下探 → 需要整体上移 1 格
 	var shift := BuildGrid.fit_shift(parts, library.defs)
@@ -333,14 +333,14 @@ func test_wheel_vehicle_survives_floor_shift_on_load() -> void:
 ## 轮胎好不好使没法靠看代码确认 —— 物理验证跑 `tools/test_drive.gd`。
 func test_wheel_specs() -> void:
 	var library := _library()
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	# 车身两格（核心），前后各挂一个侧轮：车头朝 +x，轮子挂在 +z 侧
 	var side := BuildGrid.candidate_basis(axle, Vector3i(0, 0, -1))
 	var vehicle := VehicleDef.new()
 	vehicle.parts = [
 		{"part_id": "core", "cell": Vector3i(0, 0, 0), "basis": Basis()},
-		{"part_id": "wheel_axle_2x2", "cell": Vector3i(0, 0, 1), "basis": side},
-		{"part_id": "wheel_axle_2x2", "cell": Vector3i(2, 0, 1), "basis": side},
+		{"part_id": "toy_wheel_2x2", "cell": Vector3i(0, 0, 1), "basis": side},
+		{"part_id": "toy_wheel_2x2", "cell": Vector3i(2, 0, 1), "basis": side},
 	]
 	var specs := vehicle.wheel_specs(library)
 	assert_eq(specs.size(), 2, "两个轮轴 → 两个驱动轮")
@@ -359,8 +359,8 @@ func test_wheel_specs() -> void:
 	var heavy := VehicleDef.new()
 	heavy.parts = [
 		{"part_id": "core", "cell": Vector3i(8, 0, 0), "basis": Basis()},
-		{"part_id": "wheel_axle_2x2", "cell": Vector3i(0, 0, 1), "basis": side},
-		{"part_id": "wheel_axle_2x2", "cell": Vector3i(1, 0, 1), "basis": side},
+		{"part_id": "toy_wheel_2x2", "cell": Vector3i(0, 0, 1), "basis": side},
+		{"part_id": "toy_wheel_2x2", "cell": Vector3i(1, 0, 1), "basis": side},
 	]
 	var heavy_specs := heavy.wheel_specs(library)
 	assert_eq(
@@ -474,3 +474,62 @@ func assert_almost_eq(actual: float, expected: float, tol: float, msg: String = 
 		absf(actual - expected) <= tol,
 		"%s（实际 %s，期望 %s）" % [msg, str(actual), str(expected)]
 	)
+
+
+## 多轮车转向行程：最前 / 最后的轮轴满行程，中间的按"离中点距离"缩小。
+## （用户报的：中间轮也全额转向，转弯像横着搓。）
+func test_steer_travel_factor() -> void:
+	assert_almost_eq(VehicleDef.steer_travel_factor(10.0, -10.0, 10.0), 1.0, 0.001, "最前 = 满行程")
+	assert_almost_eq(VehicleDef.steer_travel_factor(-10.0, -10.0, 10.0), 1.0, 0.001, "最后 = 满行程")
+	assert_almost_eq(VehicleDef.steer_travel_factor(0.0, -10.0, 10.0), 0.0, 0.001, "正中间 = 不转向")
+	assert_almost_eq(VehicleDef.steer_travel_factor(5.0, -10.0, 10.0), 0.5, 0.001, "四分之一处 = 一半")
+	# 没有跨度（单轮轴 / 所有轮子同一个 x）时不缩放，不然轮子完全不转
+	assert_almost_eq(VehicleDef.steer_travel_factor(3.0, 3.0, 3.0), 1.0, 0.001, "没有跨度 = 满行程")
+	assert_almost_eq(VehicleDef.steer_travel_factor(20.0, -10.0, 10.0), 1.0, 0.001, "超界夹到 1")
+
+
+## 真实载具的轮子都带 `steer_factor`，而且一定落在 0~1；每个都等于公式算出来的值。
+## 用"轮子最多的那台车"来测（数据是用户手改的，别写死 custom_1 有几个轮子）。
+func test_real_vehicle_wheels_have_steer_factor() -> void:
+	var library := _library()
+	var vehicle: VehicleDef = null
+	var most_wheels := 0
+	for candidate in VehicleDef.load_all(VEHICLE_DIR):
+		var count: int = candidate.wheel_specs(library).size()
+		if count > most_wheels:
+			most_wheels = count
+			vehicle = candidate
+	assert_true(vehicle != null, "没有任何载具")
+	if vehicle == null:
+		return
+	var specs := vehicle.wheel_specs(library)
+	assert_gt(specs.size(), 1, "至少要有两个轮子才算得出跨度")
+	var min_x := INF
+	var max_x := -INF
+	for spec in specs:
+		assert_true(spec.has("steer_factor"), "每个轮轴都要有 steer_factor")
+		var f := float(spec.get("steer_factor", -1.0))
+		assert_true(f >= 0.0 and f <= 1.0, "steer_factor 要在 0~1：%s" % str(f))
+		var x := (spec["offset"] as Vector3).x
+		min_x = minf(min_x, x)
+		max_x = maxf(max_x, x)
+	var factor_sum := 0.0
+	for spec in specs:
+		var x := (spec["offset"] as Vector3).x
+		var expected := VehicleDef.steer_travel_factor(x, min_x, max_x)
+		assert_almost_eq(
+			float(spec["steer_factor"]), expected, 0.001,
+			"轮轴 x=%.2f 的行程比例不对" % x
+		)
+		factor_sum += float(spec["steer_factor"])
+	# 只有**三排以上**（x 方向有中间轮轴）时，中间那几个才会被缩小；两排（前/后）本来就都是满行程
+	var rows := {}
+	for spec in specs:
+		rows[snappedf((spec["offset"] as Vector3).x, 0.01)] = true
+	if rows.size() >= 3:
+		assert_true(
+			factor_sum < float(specs.size()) - 0.001,
+			"中间轮轴的行程应该被缩小（%s 的行程合计 %.2f / %d 个轮子）" % [
+				vehicle.id, factor_sum, specs.size()
+			]
+		)

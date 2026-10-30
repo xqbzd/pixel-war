@@ -17,6 +17,12 @@ var size := Vector3i(VOXELS_PER_CUBE, VOXELS_PER_CUBE, VOXELS_PER_CUBE)
 var data := PackedByteArray()
 var palette: Array[Color] = [Color(0, 0, 0, 0)]
 
+## 实心范围的缓存（见 `solid_bounds_*`）。`data` 只有两种人改：`set_voxel()` 和
+## 少数直接写 `data[i]` 的地方（如 `VoxShapes.apply()`，改完要 `invalidate_bounds()`）。
+var _bounds_dirty := true
+var _solid_lo := Vector3i.ZERO    # 含
+var _solid_hi := Vector3i.ZERO    # 不含（空体积时 lo == hi）
+
 
 func _init(p_size := Vector3i(VOXELS_PER_CUBE, VOXELS_PER_CUBE, VOXELS_PER_CUBE)) -> void:
 	resize(p_size)
@@ -31,6 +37,7 @@ func resize(p_size: Vector3i) -> void:
 	data = PackedByteArray()
 	data.resize(maxi(0, size.x * size.y * size.z))
 	data.fill(EMPTY)
+	_bounds_dirty = true
 
 
 func index(x: int, y: int, z: int) -> int:
@@ -49,8 +56,13 @@ func get_voxel(x: int, y: int, z: int) -> int:
 
 
 func set_voxel(x: int, y: int, z: int, value: int) -> void:
-	if inside(x, y, z):
-		data[index(x, y, z)] = value
+	if not inside(x, y, z):
+		return
+	var at := index(x, y, z)
+	if data[at] == value:
+		return
+	data[at] = value
+	_bounds_dirty = true
 
 
 func is_solid(x: int, y: int, z: int) -> bool:
@@ -69,27 +81,67 @@ func solid_count() -> int:
 ## 用途：判断某个面是不是"这个形状在该方向的外表面"。
 ## 多数形状铺满整格（返回 0 或 size-1），但内缩的形状（比如外部工具画的轮子）
 ## 它的外表面在中间某一层 —— 用"是否贴格子边"去判断会误杀。
+##
+## ⚠️ 走的是实心范围缓存（一次扫描，之后 O(1)）。原来是"从外往里一层层找、
+## 每层扫一整片"：武器体积 48³，枪管挂在中间，外侧 16 层全是空的 —— 单次最坏要扫
+## 3.7 万个体素，而转塔进场每把枪要问十几次，**一把枪就 0.6 秒**（枪一多就是十几秒）。
 func outermost_layer(axis: int, positive: bool) -> int:
-	var n := size[axis]
-	for step in range(n):
-		var index := (n - 1 - step) if positive else step
-		if _layer_has_solid(axis, index):
-			return index
-	return -1
+	if not has_solid():
+		return -1
+	return _solid_hi[axis] - 1 if positive else _solid_lo[axis]
 
 
-func _layer_has_solid(axis: int, index: int) -> bool:
-	var a_axis := (axis + 1) % 3
-	var b_axis := (axis + 2) % 3
-	for a in range(size[a_axis]):
-		for b in range(size[b_axis]):
-			var c := Vector3i.ZERO
-			c[axis] = index
-			c[a_axis] = a
-			c[b_axis] = b
-			if is_solid(c.x, c.y, c.z):
-				return true
-	return false
+## 实心范围（单位 = 体素）：`lo` 含、`hi` 不含；空体积 `lo == hi`。
+## 提供它是为了让"求包围盒"和"网格化"都**只扫实心那一小块**，别每次把整块体积
+## （武器 48³ = 11 万个体素）从头扫一遍 —— 那是进场卡顿的主因，见 `outermost_layer()`。
+func has_solid() -> bool:
+	_ensure_bounds()
+	return _solid_hi.x > _solid_lo.x
+
+
+func solid_lo() -> Vector3i:
+	_ensure_bounds()
+	return _solid_lo
+
+
+func solid_hi() -> Vector3i:
+	_ensure_bounds()
+	return _solid_hi
+
+
+## 直接写了 `data[i]` 之后必须调它（`set_voxel()` 会自己标脏）。
+func invalidate_bounds() -> void:
+	_bounds_dirty = true
+
+
+func _ensure_bounds() -> void:
+	if not _bounds_dirty:
+		return
+	_bounds_dirty = false
+	var nx := size.x
+	var ny := size.y
+	if nx <= 0 or ny <= 0 or size.z <= 0:
+		_solid_lo = Vector3i.ZERO
+		_solid_hi = Vector3i.ZERO
+		return
+	var stride_z := nx * ny
+	var lo := Vector3i(nx, ny, size.z)
+	var hi := Vector3i(-1, -1, -1)
+	for i in range(data.size()):
+		if data[i] == EMPTY:
+			continue
+		var z := i / stride_z
+		var rest := i - z * stride_z
+		var y := rest / nx
+		var x := rest - y * nx
+		lo = lo.min(Vector3i(x, y, z))
+		hi = hi.max(Vector3i(x, y, z))
+	if hi.x < 0:
+		_solid_lo = Vector3i.ZERO
+		_solid_hi = Vector3i.ZERO
+	else:
+		_solid_lo = lo
+		_solid_hi = hi + Vector3i.ONE
 
 
 func cell_origin(cell: Vector3i) -> Vector3i:

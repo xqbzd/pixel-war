@@ -1,0 +1,51 @@
+# 小货车轮胎（3x3）：轮轴 + 轮体，画在**同一个** 小货车轮胎.vox 里（两个物体）。
+#
+# 一个零件 = 一个建模文件（2026-10-15 起的约定），尺寸（.vox 是 Z-up，导入时换成游戏 Y-up）：
+#   子模型 0（轮轴）= 32 x 16 x 16 体素 = 2 x 1 x 1 格，绕 x 轴的轴心在本地 y/z = 0.5 格；
+#   子模型 1（轮体）= 16 x 48 x 48 体素，外径 3 格。
+# 位置不用手写：画布里轮轴在 y/z 16..32、轮体在 y/z 0..48（两者中心都在 24），
+# 于是轮体落在本地 x 2..3 / y -1..2 / z -1..2 —— 轮心正好在轮轴轴线上，同心转，
+# 轮胎比零件盒低 1 格、上沿正好顶到盒子顶（cubes 的 y = 2）。
+
+name = 小货车轮胎（3x3） / Light Truck Wheel 3x3
+
+category  = 行驶
+model     = res://data/parts/truckwheel3x3/小货车轮胎.vox
+cubes     = 2 2 1
+render    = voxel
+order     = 62          # 排在玩具轮胎之后、机枪之前
+connections = -x +y +z -z
+
+# 轮体 = 同一个 .vox 里的第 1 号子模型（0 = 轮轴）。写法说明见 docs/parts-pipeline.md。
+wheel_body_model = 1
+weight = 160
+hp = 6000
+pp = 28
+
+# 动力和转向。速度使用真实 m/s；内部标定 1 格 = 0.5 米。
+# ⚠️ 这几个数先照抄玩具轮胎（同一套手感），等实车跑过再按"大轮胎"该有的样子调。
+wheel_engine_force = 30000       # 每个驱动轮的推力上限，格世界的力
+wheel_max_speed = 30             # m/s；推力接近限速时按余弦衰减至 0
+wheel_steer_max = 20             # 度
+wheel_steer_speed = 60           # 度/秒
+wheel_steer_return_speed = 240   # 松手回正速度，度/秒
+wheel_radius = 0                 # 0 = 按轮胎模型自动算（这一张算出来是 1.4375 格）
+
+# 悬挂：见 toy_wheel_2x2.part.txt 里的推导注释（同一套公式）。
+wheel_suspension_travel = 0.6     # 最大避震行程，格
+wheel_support_multiple = 12       # 触底支撑力倍率
+
+# 多射线接触（整圈射线探测台阶 / 路缘 / 坡脚 / 上方障碍）
+wheel_rays = 16
+wheel_ray_slack = 0.04
+wheel_sus_sector = 0.5
+wheel_ray_offset = 0.4           # 轮体 1 格厚，外侧面在 ±0.5 格
+
+# 轮胎力模型（Pacejka，移植自 nani_raycast_wheel，MIT，见 reference/）
+wheel_grip_factor = 1.4
+wheel_lat_pacejka = 1 10 0 1.35
+wheel_long_pacejka = 1 10 0 1.65
+
+# 整车侧倾辅助：取第一个轮轴的数值
+wheel_anti_roll_tilt = 23
+wheel_anti_roll_damping = 0.55

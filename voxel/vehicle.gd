@@ -200,17 +200,20 @@ func used_part_ids() -> Array:
 	return ids
 
 
-## 轮子规格：每个"带 `wheel_body` 的部件"（轮轴）在测试场里变成一个驱动轮。
-## 返回 [{offset: 轮胎几何中心（载具坐标系）, radius, steer_sign, transform, local_box}]。
+## 轮子规格：每个轮子部件（`PartDef.is_wheel()`，即写了 `wheel_body_model` 的轮轴）
+## 在测试场里变成一个驱动轮。
+## 返回 [{offset: 轮胎几何中心（载具坐标系）, radius, steer_sign, steer_factor, transform, local_box}]。
 ## steer_sign：在**重心之前**的轮子 +1（正转），重心之后 -1（反转）—— 全轮转向，
 ## 这样任一侧的轮子掉光了还能靠剩下的轮子转方向。
+## steer_factor：**转向行程的比例**（0~1）。多轮车只有最前 / 最后的一组轮子给满行程，
+## 偏中间的轮子按"离中点的距离"缩小 —— 以前中间轮也全额转向，转弯像在横着搓（用户报的）。
 func wheel_specs(library: PartLibrary) -> Array:
 	var out := []
 	var centre_x := center_of_mass(library).x
 	for index in parts.size():
 		var part: Dictionary = parts[index]
 		var def: PartDef = library.get_def(part["part_id"])
-		if def == null or def.wheel_body.is_empty():
+		if def == null or not def.is_wheel():
 			continue
 		var sub := def.sub_model_volume()
 		if sub == null:
@@ -228,7 +231,28 @@ func wheel_specs(library: PartLibrary) -> Array:
 			"local_box": local,
 			"local_centre": local.get_center(),
 		})
+	# 轮子前后跨度：最前 / 最后的轮轴拿满行程，中间的按比例缩小
+	var min_x := INF
+	var max_x := -INF
+	for spec in out:
+		var x := (spec["offset"] as Vector3).x
+		min_x = minf(min_x, x)
+		max_x = maxf(max_x, x)
+	for spec in out:
+		spec["steer_factor"] = steer_travel_factor((spec["offset"] as Vector3).x, min_x, max_x)
 	return out
+
+
+## 某个轮子（纵向坐标 `x`）的转向行程比例（纯函数，测试直接打它）：
+##   * 在整车轮子最前 / 最后的位置 → 1.0（满行程）；
+##   * 在正中间 → 0（不转向）；
+##   * 中间位置按线性比例；只有一个轮轴（跨度 0）时一律 1.0。
+static func steer_travel_factor(x: float, min_x: float, max_x: float) -> float:
+	var half := (max_x - min_x) * 0.5
+	if half <= 0.0001:
+		return 1.0
+	var mid := (min_x + max_x) * 0.5
+	return clampf(absf(x - mid) / half, 0.0, 1.0)
 
 
 ## 整机质量（kg）：各部件 weight 之和。

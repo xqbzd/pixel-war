@@ -17,6 +17,7 @@ var warnings: PackedStringArray = PackedStringArray()
 var _builds := {}  # "id:mode" -> build dict
 var _sub_builds := {}  # id -> build dict（附属子模型，比如轮体）
 var _weapon_builds := {}  # "id:index" -> build dict（转塔的子模型：底座/支架/枪管）
+var _icons := {}  # "id:size" -> ImageTexture（物品菜单/物品栏的斜向视图图标，按需生成）
 
 
 func load_all(path := DEFAULT_DIR) -> void:
@@ -25,6 +26,7 @@ func load_all(path := DEFAULT_DIR) -> void:
 	_builds.clear()
 	_sub_builds.clear()
 	_weapon_builds.clear()
+	_icons.clear()
 	warnings.clear()
 	var folder := DirAccess.open(dir)
 	if folder == null:
@@ -71,6 +73,46 @@ func has_part(id: String) -> bool:
 
 func get_def(id: String) -> PartDef:
 	return defs.get(id)
+
+
+## 某个分类里的部件 id（按 order / id 排，和物品栏同一套顺序）。
+## 建造界面的零件菜单按分类分页就是问它，别在 UI 里再写一遍过滤逻辑。
+func ids_for_category(category: String) -> Array:
+	var out := []
+	for id in ids():
+		var def: PartDef = defs[id]
+		if def != null and def.category == category:
+			out.append(id)
+	return out
+
+
+## 分类 -> 这一页有几个零件（菜单里给空分类显示一行"这一类还没有零件"）。
+func category_counts() -> Dictionary:
+	var out := {}
+	for key in PartDef.CATEGORIES:
+		out[key] = 0
+	for id in defs:
+		var def: PartDef = defs[id]
+		if def == null:
+			continue
+		out[def.category] = int(out.get(def.category, 0)) + 1
+	return out
+
+
+## 零件图标（斜向视图）。第一次用到才画，之后直接返回缓存的 ImageTexture。
+## ⚠️ 别在 `load_all()` 里一次画完所有零件：上百个零件就是上百张 64x64 图，
+## 而玩家可能一个菜单都不打开。按需 + 缓存才是能活到"上百种零件"的写法。
+func icon(id: String, size := PartIcon.TARGET) -> Texture2D:
+	var key := "%s:%d" % [id, size]
+	if _icons.has(key):
+		return _icons[key]
+	var def: PartDef = defs.get(id)
+	if def == null:
+		return null
+	var image := PartIcon.render(def, size)
+	var texture := ImageTexture.create_from_image(image)
+	_icons[key] = texture
+	return texture
 
 
 ## 按指定渲染路线取构建结果（缓存）。mode 用 PartDef.RenderMode 的值。

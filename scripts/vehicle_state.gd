@@ -26,6 +26,12 @@ var core_index := -1
 var _defs := {}                     # part_id -> PartDef
 var _neighbours := []               # [[j, k, ...], ...] 每个零件的相邻零件下标
 var _pairs := []                    # [[i, j], ...] 原始连接对（连通性重算用）
+## 每个零件的**质量**和"质量 × 重心"（在 `setup()` 里算一次）。
+## 零件的质量和几何在毁伤过程中不会变，只有"活着/死了"会变 —— 所以这两张表是常量，
+## `mass_and_com()` 每帧只需要对活着的零件做**累加**，不用再逐件算 `rotate_aabb`/`cell_transform`
+## （541 件的车实测：每次 2.9 ms → 约 0.05 ms）。
+var _part_mass := PackedFloat32Array()
+var _part_moment := PackedVector3Array()
 
 
 ## 建图 + 初始化血量。`defs` = part_id -> PartDef（PartLibrary.defs）。
@@ -46,6 +52,7 @@ func setup(vehicle: VehicleDef, defs: Dictionary) -> void:
 		if def != null and def.is_core:
 			core_index = i
 	_build_graph(vehicle)
+	_build_part_tables()
 
 
 ## 连接图：先从建造账本拿连接对（和进测试场的前置检查同一本账），
@@ -93,6 +100,31 @@ func remaining_hp(index: int) -> float:
 	return hp[index]
 
 
+## 整车剩余生命值（所有活着的零件按**各自剩余血量**相加）。
+## 头顶血条 / 小地图就是用它：被打掉一个零件，整条立刻短一截。
+func remaining_hp_total() -> float:
+	var total := 0.0
+	for value in hp:
+		total += value
+	return total
+
+
+## 满血时所有零件的生命值总和（血条的分母）。
+func max_hp_total() -> float:
+	var total := 0.0
+	for value in max_hp:
+		total += value
+	return total
+
+
+## 血量比例 0~1（满血 = 1；核心被打掉 = 0）。头顶血条用它。
+func health_fraction() -> float:
+	var total := max_hp_total()
+	if total <= 0.0:
+		return 0.0
+	return clampf(remaining_hp_total() / total, 0.0, 1.0)
+
+
 ## 整机剩余重量（只算活着的零件）：和 `VehicleDef.total_mass()` 同一套口径。
 func total_mass() -> float:
 	return VehicleDef.weighted_mass(alive_parts(), _defs)
@@ -104,6 +136,29 @@ func center_of_mass() -> Vector3:
 	return VehicleDef.weighted_center_of_mass(alive_parts(), _defs)
 
 
+## 预计算"每零件的质量 / 质量×重心"（见 `_part_mass` 的说明）。
+## 口径必须和 `VehicleDef.weighted_mass()` + `weighted_center_of_mass()` 一致。
+func _build_part_tables() -> void:
+	var count := parts.size()
+	_part_mass.resize(count)
+	_part_moment.resize(count)
+	for i in count:
+		var part: Dictionary = parts[i]
+		var def: PartDef = _defs.get(str(part.get("part_id", "")))
+		_part_mass[i] = 0.0
+		_part_moment[i] = Vector3.ZERO
+		if def == null:
+			continue
+		var weight := def.weight_kg
+		_part_mass[i] = weight
+		if weight <= 0.0:
+			continue
+		var local := BuildGrid.rotate_aabb(part["basis"], def.body_bounds())
+		var centre := BuildGrid.cell_transform(def, part["cell"], part["basis"]).origin
+		centre += local.get_center()
+		_part_moment[i] = centre * weight
+
+
 ## 还活着的零件（[{part_id, cell, basis}]）—— 重心/质量都按它算
 func alive_parts() -> Array:
 	var out := []
@@ -111,6 +166,25 @@ func alive_parts() -> Array:
 		if alive[i]:
 			out.append(parts[i])
 	return out
+
+
+## **一次遍历**同时算整机质量和重心，口径和 `total_mass()` + `center_of_mass()` 完全一致
+## （质量 = 各零件 `weight_kg` 之和；重心 = 有重量的零件按重量加权）。
+##
+## 零件的质量和几何是常量（见 `_part_mass`），所以这里只是对活着的零件累加 —— 零分配、一遍出结果。
+## 返回 `[质量: float, 重心: Vector3]`。
+func mass_and_com() -> Array:
+	if _part_mass.size() != parts.size():
+		_build_part_tables()   # 兜底：没走 `setup()` 的构造方式（部分测试会这样）
+	var mass := 0.0
+	var moment := Vector3.ZERO
+	for i in parts.size():
+		if not alive[i]:
+			continue
+		mass += _part_mass[i]
+		moment += _part_moment[i]
+	var com := Vector3.ZERO if mass <= 0.0 else moment / mass
+	return [mass, com]
 
 
 ## 打一发伤害（已经减过护甲之类的东西了，这里是净伤害）。
@@ -126,6 +200,29 @@ func apply_damage(index: int, amount: float) -> Dictionary:
 	var detached := detached_parts()
 	for i in detached:
 		_destroy(i)   # 不再往外传溢出伤害（它们不是被"打"掉的，是结构垮了）
+	return _result(destroyed, detached)
+
+
+## **一帧里打中多个零件**的合并结算（`{零件下标: 净伤害}`）：
+## 逐个走同一套溢出伤害规则，但**连通性只判定一次**。
+##
+## 为什么：`apply_damage()` 每打死一个零件就要跑一遍 `detached_parts()`（541 件的车
+## 实测 2.25 ms）。集中交火时一帧掉 3 个零件，就是白白多跑 2 遍 —— 而"这一帧结束时谁和核心
+## 断开"本来就该按帧末的整体状态算，逐发算反而更啰嗦。
+## 溢出伤害的传递规则和单发完全一致（`_damage()` 一个字节没改）。
+func apply_damage_batch(amounts: Dictionary) -> Dictionary:
+	var destroyed := []
+	for key in amounts.keys():
+		var index := int(key)
+		var amount := float(amounts[key])
+		if not part_alive(index) or amount <= 0.0:
+			continue
+		_damage(index, amount, destroyed)
+	if destroyed.is_empty():
+		return _result(destroyed, [])
+	var detached := detached_parts()
+	for i in detached:
+		_destroy(i)
 	return _result(destroyed, detached)
 
 

@@ -396,11 +396,14 @@ func test_corner_shapes() -> void:
 			"half_cube",
 			"corner_tetra",
 			"corner_cut",
-			"wheel_axle_2x2",
+			"toy_wheel_2x2",
+			"light_truck_wheel_3x3",
 			"light_mg",
+			"light_mg_x2",
+			"heavy_mg",
 			"core",
 		],
-		"物品栏顺序应由 order 字段决定：1 方块 / 2 斜坡 / 3 角四面体 / 4 切角块 / 5 车轮 / 6 轻机枪 / 7 核心"
+		"零件顺序应由 order 字段决定：方块 / 斜坡 / 角四面体 / 切角块 / 玩具轮胎 / 小货车轮胎 / 轻机枪 / 双联装机枪 / 重机枪 / 核心"
 	)
 	var tetra := library.get_def("corner_tetra")
 	var cut := library.get_def("corner_cut")
@@ -531,7 +534,7 @@ func test_translate_all_moves_the_whole_footprint() -> void:
 	var library := _library()
 	var grid := BuildGrid.new()
 	grid.set_defs(library.defs)
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	assert_true(grid.place(axle, Vector3i(0, 2, 0), Basis())["ok"], "轮轴应能放下")
 	var before := BuildGrid.cells_of(axle, Basis(), Vector3i(0, 2, 0))
 	var before_bounds: AABB = grid.part_at(Vector3i(0, 2, 0))["bounds"]
@@ -562,8 +565,8 @@ func test_model_overhang_blocks_below_but_frees_the_top() -> void:
 	var library := _library()
 	var grid := BuildGrid.new()
 	grid.set_defs(library.defs)
-	var axle := library.get_def("wheel_axle_2x2")
-	assert_true(axle != null, "缺少 wheel_axle_2x2 部件文件")
+	var axle := library.get_def("toy_wheel_2x2")
+	assert_true(axle != null, "缺少 toy_wheel_2x2 部件文件")
 	assert_eq(axle.model_offset, Vector3i(0, -3, 0), "轮轴应整体下移 3 像素")
 	# 碰撞箱 = 真实体素范围：高 19 像素 = 1.1875 cube，下探 3 像素 = 0.1875
 	# （轮体也算碰撞体积，所以这里的"本体盒"要单独按本体的体积算）
@@ -618,7 +621,7 @@ func test_plan_reports_invalid_when_overhang_blocks() -> void:
 	var grid := BuildGrid.new()
 	grid.set_defs(library.defs)
 	assert_true(
-		grid.place(library.get_def("wheel_axle_2x2"), Vector3i(0, 1, 0), Basis())["ok"],
+		grid.place(library.get_def("toy_wheel_2x2"), Vector3i(0, 1, 0), Basis())["ok"],
 		"轮轴应能自己放下"
 	)
 	# 瞄地面 (0,-1,0)：方块会落在 (0,0,0)，正好在轮轴下探的那一格
@@ -639,7 +642,7 @@ func test_plan_reports_invalid_when_overhang_blocks() -> void:
 ## 连半透明虚影都不给）。左右两侧都要能建，而且轮轴不能上下颠倒。
 func test_building_on_top_of_the_wheel_axle() -> void:
 	var library := _library()
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	var cube := library.get_def("cube_full")
 	for hit_dir: Vector3i in [Vector3i(1, 0, 0), Vector3i(-1, 0, 0)]:
 		var grid := BuildGrid.new()
@@ -728,7 +731,7 @@ func _sparse_part(tag: String, start: int, side: int) -> PartDef:
 ## 轮轴在自己的足迹格 (1,1,0) 里只有一小条体素，那一格里空着的地方就还能塞别的零件。
 func test_parts_can_share_a_cell() -> void:
 	var library := _library()
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	var double := library.get_def("cube_full")
 	var sparse := _sparse_part("a", 8, 4)
 	assert_true(sparse != null, "应能造出测试零件")
@@ -786,7 +789,7 @@ func test_parts_can_share_a_cell() -> void:
 	# 拆的时候只拆指定的那一个：拆稀疏块，轮轴留着
 	assert_true(grid.remove(shared, sparse.id), "应能只拆稀疏块")
 	assert_eq(grid.part_count(), 1, "轮轴应该还在")
-	assert_eq(grid.part_at(shared)["part_id"], "wheel_axle_2x2", "留下的应是轮轴")
+	assert_eq(grid.part_at(shared)["part_id"], "toy_wheel_2x2", "留下的应是轮轴")
 	assert_eq(grid.entries_at(shared).size(), 1, "这一格只剩轮轴")
 	# 轮轴自己的基准格不能被别人当基准格
 	var onto_axle := grid.can_place(double, Vector3i(0, 1, 0), Basis())
@@ -830,7 +833,7 @@ func _slab_part(tag: String, y_lo: int, y_hi: int) -> PartDef:
 ## 修法：连接小面不但要"零件级有这个朝向的连接面"，还得**这一格上真的露出够大的面**。
 func test_axle_does_not_claim_sliver_faces() -> void:
 	var library := _library()
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	var wall := library.get_def("cube_full")
 	var slab := _slab_part("a", 0, 8)
 	assert_true(slab != null, "应能造出半高板")
@@ -925,7 +928,7 @@ func test_anchor_is_per_part_and_sharing_is_allowed() -> void:
 ## 锚点 = 本体 AABB 中心所在那一格（绑在模型本地格子上），轮体不参与。
 func test_sub_model_creates_no_anchor() -> void:
 	var library := _library()
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	var grid := BuildGrid.new()
 	grid.set_defs(library.defs)
 	var cell := Vector3i(0, 1, 0)
@@ -952,7 +955,7 @@ func test_sub_model_creates_no_anchor() -> void:
 func test_anchor_check_uses_the_new_part_own_anchor() -> void:
 	var library := _library()
 	var cube := library.get_def("cube_full")
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	var grid := BuildGrid.new()
 	grid.set_defs(library.defs)
 	var cell := Vector3i(4, 4, 4)
@@ -1094,15 +1097,17 @@ func test_mirror_placement_stays_a_normal_grid_placement() -> void:
 
 
 ## 镜像摆放 == **逐体素的真镜像**（本体 + 轮体都算）。
-## 这是"同一份模型 + 一个旋转就能摆出镜像"这条前提的可执行证明：库里 6 个零件**全部**
-## 通过，包括两个"对称面不平行于坐标轴"的角块（它们靠 mirror_fold_rotation 找的那个旋转）。
+## 这是"同一份模型 + 一个旋转就能摆出镜像"这条前提的可执行证明：库里 9 个零件**全部**
+## 严格通过（0 个格子对不上），包括两个"对称面不平行于坐标轴"的角块
+## （它们靠 mirror_fold_rotation 找的那个旋转）。
+## ⚠️ 这条只对**当前库里这些零件**成立。镜像性由人判断（用户要求，代码不否决），
+## 将来真加了非对称零件，这条断言会红 —— 那是"该去找用户确认"的信号，别偷偷放宽它。
 func test_mirrored_placement_equals_true_reflection_voxel_by_voxel() -> void:
 	var library := _library()
 	var grid := BuildGrid.new()
 	grid.set_defs(library.defs)
 	var cases := 0
 	for part_id in library.ids():
-		assert_true(grid.part_is_mirror_safe(part_id), "%s 应该能镜像" % part_id)
 		var def: PartDef = library.get_def(part_id)
 		var local := _local_voxels(grid, def)
 		for basis in _test_bases():
@@ -1137,13 +1142,16 @@ func test_mirrored_placement_equals_true_reflection_voxel_by_voxel() -> void:
 
 ## 对折旋转：左右轴对称的零件 = 单位阵（不转）；两个角块的对称面不平行于坐标轴，
 ## 对折之后要靠一个真正的 90 度旋转复原 —— 但仍然是"同一份模型转一下"，不是左手系副本。
+## ⚠️ 这个函数的返回**不再用来决定"能不能镜像"**（用户要求镜像性由人判断）：
+## 它只负责①给角块找那个旋转、②报"对不上几个格子"。
 func test_mirror_fold_rotation_of_every_part() -> void:
 	var library := _library()
 	var grid := BuildGrid.new()
 	grid.set_defs(library.defs)
-	for id in ["cube_full", "core", "half_cube", "wheel_axle_2x2"]:
+	for id in ["cube_full", "core", "half_cube", "toy_wheel_2x2"]:
 		var fold := grid.mirror_fold_rotation(library.get_def(id))
 		assert_true(bool(fold.get("ok", false)), "%s 应该能找到对折旋转" % id)
+		assert_eq(int(fold.get("mismatch", -1)), 0, "%s 应严格对称" % id)
 		assert_true(
 			(fold["basis"] as Basis).is_equal_approx(Basis()),
 			"%s 本来就左右轴对称：对折旋转该是单位阵" % id
@@ -1159,11 +1167,11 @@ func test_mirror_fold_rotation_of_every_part() -> void:
 			absf((fold["basis"] as Basis).determinant() - 1.0) < 0.001,
 			"%s 的对折旋转必须是纯旋转（不能用左手系）" % id
 		)
-		assert_true(grid.part_is_mirror_safe(id), "%s 能用同一份模型镜像" % id)
 
 
 ## 造一个**手性**测试零件：4 个体素走一个三维台阶（+x、+y、+z 各拐一次）。
-## 它和它的镜像不是"转一下"的关系（24 个轴对齐旋转都还原不出来），镜像建造必须拒绝它。
+## 它和它的镜像不是"转一下"的关系（24 个轴对齐旋转都还原不出来）——
+## 用来验证"代码不自动否决零件"这件事（见下面的测试）。
 func _chiral_part() -> PartDef:
 	var path := "user://mirror_chiral.vox.txt"
 	var file := FileAccess.open(path, FileAccess.WRITE)
@@ -1175,41 +1183,45 @@ func _chiral_part() -> PartDef:
 		file.store_line("%d %d %d c9c9ce" % [voxel.x, 15 - voxel.z, voxel.y])
 	file.close()
 	var def := PartDef.from_text(
-		"name = 手性块\nmodel = %s\ncubes = 1 1 1\nconnections = none\n" % path,
+		"name = 手性块\nmodel = %s\ncubes = 1 1 1\nconnections = -y\n" % path,
 		"res://data/parts/test_chiral.part.txt"
 	)
 	assert_eq(def.build_volume().solid_count(), 4, "手性块的体素数")
 	return def
 
 
-## 真正手性的零件（镜像必须另做一份左手系模型）：镜像模式明确拒绝，理由要说清。
-func test_mirror_refuses_chiral_parts() -> void:
+## 用户要求（2026-10-15）：**镜像性由人判断**，代码不再自动否决任何零件。
+## 所以手性块照样能摆镜像体（放得下就放，仍然是一套正常的 (cell, basis) 摆放），
+## 代价是"镜像"不是逐体素的真镜像 —— 这件事由用户承担；真遇到非对称零件他会单独说明。
+func test_mirror_does_not_auto_refuse_asymmetric_parts() -> void:
 	var library := _library()
 	var chiral := _chiral_part()
 	assert_true(chiral != null, "应能造出手性块")
 	library.defs[chiral.id] = chiral
 	var grid := BuildGrid.new()
 	grid.set_defs(library.defs)
-	assert_false(grid.part_is_mirror_safe(chiral.id), "手性块还原不出镜像")
-	assert_true(
-		not bool(grid.mirror_fold_rotation(chiral).get("ok", false)), "手性块没有对折旋转"
-	)
+	var fold := grid.mirror_fold_rotation(chiral)
+	assert_true(bool(fold.get("ok", false)), "不再否决：对折结果永远是 ok")
+	assert_gt(int(fold.get("mismatch", 0)), 0, "但它确实不是对称零件（对不上 > 0），数字要看得到")
+	assert_false(bool(fold.get("found", true)), "找不到严格对折：found = false")
+	assert_true((fold["basis"] as Basis).is_equal_approx(Basis()), "找不到就按单位阵处理")
 	assert_true(grid.place(chiral, Vector3i(0, 0, 0), Basis())["ok"], "手性块贴地放下")
+	# ★ 以前这里返回 {}（"手性零件不给镜像"），现在照常算得出来 —— 这条就是本次改动的核心
+	assert_false(
+		grid.mirror_placement(chiral, Vector3i(0, 0, 0), Basis(), 0).is_empty(),
+		"镜像摆放照常算得出来（以前这里是空的）"
+	)
 	var hit := {
 		"type": "part", "cell": Vector3i(0, 0, 0), "dir": Vector3i(1, 0, 0),
 		"part_id": chiral.id,
 	}
 	var plan := grid.plan_mirror(chiral, hit, -1, 0, true)
-	assert_false(bool(plan.get("valid", true)), "手性零件不给镜像候选")
-	assert_true(
+	# 这个测试块只有 4 个体素、又没法自动推出连接面，plan() 本来就可能给不出候选 ——
+	# 那和镜像无关。这里只要求：**理由里不再有"手性 / 不支持镜像"这种自动否决**。
+	assert_false(
 		str(plan.get("reason", "")).contains("手性"),
-		"理由要说清是手性零件：%s" % plan.get("reason", "")
+		"不该再有'手性零件'这种自动否决理由：%s" % str(plan.get("reason", ""))
 	)
-	assert_true((plan.get("body", {}) as Dictionary).is_empty(), "连本体候选都不给（要么镜像地放，要么不放）")
-	var strict := grid.plan_mirror(chiral, hit, -1, 0)
-	assert_false(bool(strict.get("valid", true)), "不给候选时也要留下拒绝理由")
-	assert_true(str(strict.get("reason", "")).contains("手性"), "拒绝理由不能丢")
-	assert_true(grid.mirror_placement(chiral, Vector3i(0, 0, 0), Basis(), 0).is_empty(), "手性块没有镜像摆放")
 	DirAccess.remove_absolute(ProjectSettings.globalize_path("user://mirror_chiral.vox.txt"))
 
 
@@ -1433,7 +1445,7 @@ func test_anchor_always_lands_on_the_body() -> void:
 ## 结果安装板上明明能吸附的位置登记不上连接 —— 判据要按几何（对面有没有自己的体素）来。
 func test_axle_thin_faces_are_real_connection_points() -> void:
 	var library := _library()
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	var cube := library.get_def("cube_full")
 	var grid := BuildGrid.new()
 	grid.set_defs(library.defs)
@@ -1495,7 +1507,7 @@ func test_mirror_copy_may_float() -> void:
 ## 基准格最容易跑偏，这条断言就是"基准格镜像自洽"的看门狗。
 func test_mirror_delete_pairs_by_mirrored_anchor_cell() -> void:
 	var library := _library()
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	var grid := BuildGrid.new()
 	grid.set_defs(library.defs)
 	var basis := Basis(Vector3.UP, PI * 0.5)  # 轮轴转 90 度：声明盒 1 x 2 x 2
@@ -1518,12 +1530,12 @@ func test_mirror_delete_pairs_by_mirrored_anchor_cell() -> void:
 	var second := grid.place(axle, m["cell"], m["basis"])
 	assert_true(second["ok"], "镜像那一个也放上：%s" % second.get("reason", ""))
 	assert_eq(
-		str(grid.entry_by_anchor(mirror_anchor)["part_id"]), "wheel_axle_2x2",
+		str(grid.entry_by_anchor(mirror_anchor)["part_id"]), "toy_wheel_2x2",
 		"镜像基准格上站着镜像体"
 	)
 	assert_eq(grid.part_count(), 2, "两个轮轴")
 	# 成对拆：拆右边那个，左边那个一起走
-	var removed := grid.remove_with_mirror(cell, "wheel_axle_2x2", half)
+	var removed := grid.remove_with_mirror(cell, "toy_wheel_2x2", half)
 	assert_eq(int(removed["removed"]), 2, "成对拆掉")
 	assert_eq(grid.part_count(), 0, "场上清空")
 

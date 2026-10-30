@@ -1,0 +1,21 @@
+# 由建造模式保存（坐标就是建造场地里的坐标，原样还原）
+# 格式：part = <部件id> <x> <y> <z> yaw pitch roll（角度 90 度一档）
+name = 人机·双枪
+
+part = cube_full 3 1 0 0 270 0
+part = cube_full 3 1 -1 0 90 0
+part = cube_full 4 1 -1 0 0 270
+part = cube_full 4 1 0 0 0 270
+part = cube_full 5 1 -1 0 0 270
+part = cube_full 5 1 0 0 0 270
+part = cube_full 8 1 0 0 0 270
+part = cube_full 8 1 -1 0 0 270
+part = cube_full 9 1 0 0 0 270
+part = cube_full 9 1 -1 0 0 270
+part = core 6 1 -1 90 270 0
+part = toy_wheel_2x2 8 1 -3 90 270 0
+part = toy_wheel_2x2 8 1 1 270 90 0
+part = toy_wheel_2x2 3 1 -3 90 90 0
+part = toy_wheel_2x2 3 1 1 270 270 0
+part = light_mg 5 2 -2 0 0 0
+part = light_mg 3 2 -1 0 0 0

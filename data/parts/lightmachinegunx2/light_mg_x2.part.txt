@@ -1,0 +1,57 @@
+﻿# 双联装机枪（3x3x3）—— 转塔武器：和单连装**跑同一套代码**，只有模型和数值不同。
+#
+# 模型 轻机枪双联装.vox 同样是 MagicaVoxel 场景（48×48×48 体素 = 3×3×3 cube），
+# 里面的三个物体序号和单连装一一对应（所以下面两行和 light_mg.part.txt 完全一样）：
+#   0 = 底座  16×16×4 体素   —— 和单连装逐体素相同（832 体素）
+#   1 = 支架  16×16×12 体素  —— 同上
+#   2 = 双枪管 14×9×32 体素   —— 只多了并列的第二根枪管（1122 体素 vs 单连装 684）
+# 转轴 / 转点 / 枪口全部从模型推导（PartDef.weapon_*），三个物体的包围盒和单连装一致，
+# 所以推出来的转轴、俯仰转点、枪口点和单连装一样 —— 子弹从两管中间出去。
+# 想做"左右管轮流开火"那种细节，那是代码层的事（现在一次一发），不在数据里。
+
+name = 双联装机枪 / Twin Light MG
+
+category   = 武器
+model      = res://data/parts/lightmachinegunx2/轻机枪双联装.vox
+cubes      = 3 3 3
+render     = voxel
+order      = 66          # 紧跟在轻机枪（65）后面
+# 连接点：和单连装一样只有底面那一格（1×1 的小底板）
+connections = -y
+
+# ── 武器：转塔 ─────────────────────────────────────────────────────────────
+weapon = turret
+weapon_yaw_model   = 1    # 支架：相对底座水平旋转（子模型序号）
+weapon_pitch_model = 2    # 枪管：相对支架上下俯仰
+weapon_yaw_limit   = 360
+weapon_pitch_min   = -20
+weapon_pitch_max   = 60
+
+# ── 开火 ───────────────────────────────────────────────────────────────────
+# 速度一律写**真实 m/s**（世界标定 1 cube = 0.5 米）。
+# 双联装 = 挨得更快的枪：射速 ×1.5、每发伤害略降，代价是更重、更费电、转向更慢。
+# ⚠️ 这几个数先按"比单连装强一档"填，等实测手感再调。
+weapon_projectile   = ray     # 射线类：瞬间命中，没有弹速/下坠/寿命，只有最大射程
+weapon_ray_range    = 400     # 最大射程，米（射线类专用）
+weapon_muzzle_speed = 800     # 子弹初速度，m/s
+weapon_damage       = 400     # 每发伤害
+weapon_rpm          = 550     # 射速，发/分钟
+weapon_spread       = 0.25     # 初速度的随机角散射，度
+weapon_traverse_speed = 360   # 炮塔最高转速，度/秒（比单连装 720 慢，炮塔更重）
+weapon_energy_cost  = 100     # 每发耗能：760 rpm × 150 ≈ 1900/s，核心恢复 2000/s，刚好跟得上
+# 弹丸寿命（秒）：射速 × 寿命 = 同屏最多几发
+weapon_projectile_life = 0.5
+
+# ── 弹头（普通子弹）── 含义和单连装的同名参数完全一样，见 light_mg.part.txt ──────
+# 默认值 = 加这几个参数之前的行为（手感不变）。
+weapon_recoil_impulse = 100     # 后坐冲量（kg·格/秒，作用在枪口；0 = 没后坐）
+# 支架（水平旋转部分）要不要独立碰撞盒：体积小的枪用 false（并进车体合并盒，省一个 shape）
+weapon_swivel_collider = false
+weapon_impact_impulse = 50      # 冲击冲量（kg·格/秒，作用在命中点；0 = 不推）
+weapon_bullet_color   = ffd959 # 弹头颜色（曳光 + 弹着火花）；默认 = 现在的黄色
+weapon_damage_falloff = 0.1      # 每飞 100 米损失的伤害比例（0.1 = -10%/100m）
+
+# 基本数值
+weight    = 20
+hp        = 13000
+pp        = 55

@@ -94,9 +94,28 @@ func test_reads_handcrafted_vox() -> void:
 func test_oversized_model_warns() -> void:
 	var volume := VoxVolume.new(Vector3i(32, 32, 32))
 	volume.palette = [Color(0, 0, 0, 0), Color("c9c9ce")]
+	volume.set_voxel(0, 0, 0, 1)
 	volume.set_voxel(31, 31, 31, 1)
 	var path := "user://oversized.vox"
 	assert_true(VoxFile.save_vox(path, volume), "写出应成功")
 	var loaded := VoxFile.load_vox(path, Vector3i(16, 16, 16))
 	assert_gt(loaded["warnings"].size(), 0, "模型比部件大时应留下警告")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+
+
+## 反过来：画在画布角落、但自己很小的模型**不算**超框（不能报假警告）。
+## 判据是模型自己的包围盒 —— 体素在 load_vox_models() 里已经归一到 0 基，
+## 作者把物体画在画布哪个角落都不影响它落地在部件盒里的位置（那件事由 model_offset 管）。
+## 以前按"场景偏移 + 尺寸"判断，随手画在画布边上的模型就会被误报成超框
+## （小货车轮胎的轮轴就踩到了这条）。
+func test_small_model_in_a_canvas_corner_is_not_oversized() -> void:
+	var volume := VoxVolume.new(Vector3i(48, 48, 48))
+	volume.palette = [Color(0, 0, 0, 0), Color("c9c9ce")]
+	volume.set_voxel(40, 40, 40, 1)
+	var path := "user://corner_model.vox"
+	assert_true(VoxFile.save_vox(path, volume), "写出应成功")
+	var loaded := VoxFile.load_vox(path, Vector3i(16, 16, 16))
+	assert_eq(
+		loaded["warnings"].size(), 0, "一格大的模型不该报超框：%s" % str(loaded["warnings"])
+	)
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))

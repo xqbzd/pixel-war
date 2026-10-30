@@ -193,3 +193,20 @@ func test_handling_table() -> void:
 	)
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 	GameSettings.forget_audio(path)
+
+
+## 机库选择记忆：没存过 = 空串；写进去能读回来、能覆盖；空 id 不擦记录。
+## 主界面就用这两个函数记住"上次选的那台车"（切场景 / 退出重进都不跳回第一台）。
+func test_garage_remembers_selection() -> void:
+	var path := "user://tmp_garage_settings.cfg"
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	GameSettings.forget(path)
+	assert_eq(GameSettings.selected_vehicle(path), "", "没存过 = 空串")
+	GameSettings.set_selected_vehicle("custom_2", path)
+	assert_eq(GameSettings.selected_vehicle(path), "custom_2", "存进去能读回来")
+	GameSettings.set_selected_vehicle("bot_light", path)
+	assert_eq(GameSettings.selected_vehicle(path), "bot_light", "能覆盖上一次的选择")
+	GameSettings.set_selected_vehicle("", path)
+	assert_eq(GameSettings.selected_vehicle(path), "bot_light", "空 id 不覆盖（不会把记录擦掉）")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	GameSettings.forget(path)

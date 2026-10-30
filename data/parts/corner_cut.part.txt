@@ -5,6 +5,7 @@
 
 name = 切角块 / Corner-Cut Block
 
+category  = 结构
 shape     = corner_cut
 cubes     = 1 1 1
 render    = voxel

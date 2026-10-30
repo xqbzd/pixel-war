@@ -9,6 +9,7 @@
 
 name = 斜切三棱柱 / Ramp Prism
 
+category  = 结构
 shape     = half_prism_xy
 cubes     = 1 1 1
 render    = voxel

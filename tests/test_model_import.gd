@@ -136,7 +136,7 @@ func _replaced_by_test_wheel_axle_part() -> void:
 	var library := PartLibrary.new()
 	library.load_all("res://data/parts")
 	assert_eq(library.warnings.size(), 0, "部件加载不该有警告：%s" % str(library.warnings))
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	var wheel := library.get_def("wheel_2x2")
 	assert_true(axle != null, "缺少轮轴部件")
 	assert_true(wheel != null, "缺少轮体部件")
@@ -160,7 +160,7 @@ func test_wheel_axle_part() -> void:
 	var library := PartLibrary.new()
 	library.load_all("res://data/parts")
 	assert_eq(library.warnings.size(), 0, "部件加载不该有警告：%s" % str(library.warnings))
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	assert_true(axle != null, "缺少轮轴部件")
 	assert_eq(axle.cubes, Vector3i(2, 2, 1), "轮轴占 2x2x1 cube")
 	assert_eq(axle.connection_faces().size(), 4, "轮轴应有 4 个连接面：%s" % str(axle.connection_faces()))
@@ -170,10 +170,11 @@ func test_wheel_axle_part() -> void:
 	# 轮体：只是模型，不是部件
 	assert_false(library.has_part("wheel_2x2"), "轮体不该是可放置部件")
 	assert_true(
-		axle.wheel_body.ends_with("2x2轮体.vox"),
-		"轮轴应引用轮体模型，实际是 '%s'" % axle.wheel_body
+		axle.model_path.ends_with("2x2玩具轮胎.vox"),
+		"轮轴和轮体应画在同一个 .vox 里，实际是 '%s'" % axle.model_path
 	)
-	assert_true(FileAccess.file_exists(axle.wheel_body), "轮体模型文件应存在")
+	assert_true(FileAccess.file_exists(axle.model_path), "模型文件应存在")
+	assert_eq(axle.wheel_body_model, 1, "轮体 = 同一个 .vox 里的第 1 号子模型")
 
 
 ## connections 显式写空 / none = 这个部件没有连接面（挂不上任何东西）。
@@ -250,7 +251,7 @@ func test_model_offset_can_overhang() -> void:
 ## 轮轴按用户要求整体下移 3 像素，所以贴地那一层应该被判超框（这正是红色虚影的用处）。
 func test_wheel_axle_drops_below_floor_at_bottom_row() -> void:
 	var library := _library_parts()
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	assert_eq(axle.model_offset, Vector3i(0, -3, 0), "轮轴应带 3 像素下移")
 	var grid := BuildGrid.new()
 	grid.set_defs(library.defs)
@@ -258,15 +259,27 @@ func test_wheel_axle_drops_below_floor_at_bottom_row() -> void:
 	assert_true(grid.inside_area(axle, Basis(), Vector3i(0, 1, 0)), "抬高 1 格应合法")
 
 
-## 轮体是轮轴的**附属子模型**：按 wheel_offset 挂上去，而且**算碰撞体积**。
-## 它在测试场里要挂到 VehicleWheel3D 上随悬挂浮动，所以网格是单独一份。
+## 轮体是轮轴的**附属子模型**：按画布里的相对位置挂上去，而且**算碰撞体积**。
+## 它在测试场里要挂到驱动轮节点上随悬挂浮动，所以网格是单独一份。
 func test_wheel_body_is_a_sub_model_with_collision() -> void:
 	var library := _library_parts()
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	assert_true(axle != null, "缺少轮轴部件")
-	assert_false(axle.wheel_body.is_empty(), "轮轴应声明 wheel_body")
+	assert_true(axle.is_wheel(), "轮轴应声明 wheel_body_model")
+	# 位置 = 画布里两个物体的相对位置 + model_offset（没写 wheel_offset 时）
 	# 数值是**游戏内**坐标（y = 高度、z = 深度）：.vox 装载时做过 (x, z, 镜像 y) 换算
-	assert_eq(axle.wheel_offset, Vector3i(32, -16, -8), "轮体的挂载偏移应读进来")
+	assert_eq(axle.wheel_offset, Vector3i.ZERO, "没写微调 = 0，位置交给画布")
+	# 断言的是**规则**（画布相对位置 + model_offset），不是某个魔数 ——
+	# 用户每重新导出一次模型，画布位置就可能差几个体素，写死数字会一直红。
+	var want := Vector3(axle.wheel_body_scene_shift() + axle.model_offset)
+	assert_true(
+		(axle.sub_model_offset() * 16.0 - want).length() <= 0.001,
+		"轮体的挂载偏移 = 画布相对位置 %s + model_offset %s（实际 %s）" % [
+			str(axle.wheel_body_scene_shift()),
+			str(axle.model_offset),
+			str(axle.sub_model_offset() * 16.0),
+		]
+	)
 	var sub := axle.sub_model_volume()
 	assert_true(sub != null, "轮体模型应该能读出来")
 	assert_true(sub.solid_count() > 0, "轮体应该有体素")
@@ -275,9 +288,6 @@ func test_wheel_body_is_a_sub_model_with_collision() -> void:
 	assert_eq(sub.size.x % 16, 0, "轮体体积 x 应是整 cube：%s" % str(sub.size))
 	assert_eq(sub.size.y % 16, 0, "轮体体积 y 应是整 cube：%s" % str(sub.size))
 	assert_eq(sub.size.z % 16, 0, "轮体体积 z 应是整 cube：%s" % str(sub.size))
-	assert_true(
-		axle.sub_model_offset().is_equal_approx(Vector3(2.0, -1.0, -0.5)), "偏移换算成 cube"
-	)
 	# 碰撞盒 = 本体 ∪ 轮体
 	var full := axle.mesh_bounds()
 	var sub_box := PartDef.tight_bounds(sub, axle.sub_model_offset(), Vector3.ONE)

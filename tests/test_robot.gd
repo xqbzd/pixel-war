@@ -67,7 +67,7 @@ func test_core_part_is_flagged_and_shaped_2x2x1() -> void:
 ## 重心 = 零件几何中心（读的是缓存的包围盒，游戏里每帧问也是 O(1)）；`center` 可覆盖。
 func test_center_of_mass_is_geometric_center() -> void:
 	var library := _library()
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	var centre := axle.center_of_mass()
 	assert_true(centre.is_equal_approx(axle.mesh_bounds().get_center()), "重心应等于几何中心")
 	assert_true(axle.center_of_mass().is_equal_approx(centre), "重心应稳定（缓存）")
@@ -225,7 +225,7 @@ func test_link_pairs_counts_geometric_neighbours() -> void:
 ## 没写这些键的部件要有能用的默认值（不能变成 0 导致车不动）。
 func test_wheel_parameters_live_in_the_part_file() -> void:
 	var library := _library()
-	var axle := library.get_def("wheel_axle_2x2")
+	var axle := library.get_def("toy_wheel_2x2")
 	assert_true(axle != null, "缺少轮轴部件")
 	assert_true(axle.wheel_engine_force > 0.0, "推力应 > 0：%s" % axle.wheel_engine_force)
 	assert_true(axle.wheel_brake > 0.0, "刹车力应 > 0：%s" % axle.wheel_brake)
@@ -237,7 +237,12 @@ func test_wheel_parameters_live_in_the_part_file() -> void:
 		"转向角速度应 > 0（车轮缓启动的速率）：%s" % axle.wheel_steer_speed
 	)
 	assert_true(axle.wheel_suspension_travel > 0.0, "悬挂行程应 > 0")
-	assert_almost_eq(axle.wheel_support_multiple, 8.0, 0.0001, "默认触底弹簧总力 = 8 倍初始车重")
+	# 触底支撑倍率是**每张轮胎自己的调参项**（用户会按车重去调，这一套现在写 12）。
+	# "默认 = 8 倍车重" 这条守的是"不写这个键时的默认值"，见本函数末尾的 bare。
+	assert_true(
+		axle.wheel_support_multiple >= 1.0,
+		"触底支撑倍率应 >= 1：%s" % axle.wheel_support_multiple
+	)
 	assert_true(axle.wheel_radius >= 0.0, "半径 0 表示按模型自动算")
 	# 自定义轮胎的手感旋钮：都必须能从部件文件读到（用户直接调这些）
 	assert_true(axle.wheel_rays >= 3, "整圈射线条数应 >= 3：%s" % axle.wheel_rays)
@@ -270,6 +275,9 @@ func test_wheel_parameters_live_in_the_part_file() -> void:
 		and bare.wheel_max_speed > 0.0,
 		"默认轮子参数要能用：%s / %s / %s"
 		% [bare.wheel_engine_force, bare.wheel_support_multiple, bare.wheel_max_speed]
+	)
+	assert_almost_eq(
+		bare.wheel_support_multiple, 8.0, 0.0001, "默认触底弹簧总力 = 8 倍初始车重"
 	)
 	# 写歪了要各留一条警告，并且保留原值
 	var bad := PartDef.from_text(
@@ -562,6 +570,204 @@ func test_camera_yaw_reference_follows_or_not() -> void:
 	assert_eq(
 		TestField.camera_yaw_reference(Vector3.ZERO, false), Vector3.RIGHT,
 		"不跟车时连车头都不用看（车头没定义也照样有基准）"
+	)
+
+
+## 镜头：滚轮调的是**视野（FOV）**，不是远近；右键按住开镜，开镜时视野 = 腰射视野 ÷ 倍率。
+func test_camera_fov_wheel_and_scope_zoom() -> void:
+	# 平时：往前滚一格 = 视野 -2.5°（放大），往后滚 = 变广；两头夹住
+	# 2026-10-18：用户嫌"拉得太远"，最窄 30° 不变、上限收到 53°（行程约为原来的 1/3）
+	assert_almost_eq(TestField.fov_after_wheel(50.0, 1), 47.5, 0.001, "往前滚一格 = 视野 -2.5°")
+	assert_almost_eq(
+		TestField.fov_after_wheel(50.0, -2), TestField.CAMERA_FOV_MAX, 0.001,
+		"往后滚两格会撞上限（50 + 5 已经超过 53）"
+	)
+	assert_almost_eq(
+		TestField.CAMERA_FOV_MAX - TestField.CAMERA_FOV_MIN, 23.0, 0.001,
+		"可调行程 23°（原来 70°，约 1/3）"
+	)
+	assert_almost_eq(
+		TestField.fov_after_wheel(TestField.CAMERA_FOV_MIN, 5),
+		TestField.CAMERA_FOV_MIN,
+		0.001,
+		"视野不能比下限还窄"
+	)
+	assert_almost_eq(
+		TestField.fov_after_wheel(TestField.CAMERA_FOV_MAX, -5),
+		TestField.CAMERA_FOV_MAX,
+		0.001,
+		"视野不能比上限还广（鱼眼）"
+	)
+	# 开镜：2 倍 = 视野减半；16 倍 = 视野 1/16；倍率越大视野越窄
+	assert_almost_eq(TestField.scoped_fov(70.0, 2.0), 35.0, 0.001, "2 倍镜 = 视野减半")
+	assert_almost_eq(TestField.scoped_fov(70.0, 16.0), 4.375, 0.001, "16 倍 = 视野 1/16")
+	assert_true(
+		TestField.scoped_fov(70.0, 16.0) < TestField.scoped_fov(70.0, 2.0),
+		"倍率越大视野越窄"
+	)
+	# 倍率：乘法步进（各倍数下手感一致），夹在 2~16 倍
+	assert_almost_eq(TestField.zoom_after_wheel(4.0, 2), 6.25, 0.001, "两格 = 4 × 1.25²")
+	assert_almost_eq(
+		TestField.zoom_after_wheel(TestField.SCOPE_ZOOM_MIN, -3),
+		TestField.SCOPE_ZOOM_MIN,
+		0.001,
+		"最小 2 倍"
+	)
+	assert_almost_eq(
+		TestField.zoom_after_wheel(TestField.SCOPE_ZOOM_MAX, 9),
+		TestField.SCOPE_ZOOM_MAX,
+		0.001,
+		"最大 16 倍"
+	)
+
+
+## 单场记忆（用户明确要的）：松开右键收镜之后倍率不清零，下次开镜还是上次那个数；
+## 收镜时滚轮调的是腰射视野，不会把倍率改掉。
+func test_scope_zoom_is_remembered_across_scope_in_and_out() -> void:
+	var field := TestField.new()
+	# 腰射：滚轮改视野，不改倍率
+	field.zoom_wheel(4)
+	var hip := field._fov
+	assert_almost_eq(
+		field.target_fov(), hip, 0.001, "没开镜时视野就是腰射视野"
+	)
+	assert_almost_eq(
+		hip, TestField.CAMERA_FOV - 4.0 * TestField.CAMERA_FOV_STEP, 0.001,
+		"没开镜时滚轮改的是腰射视野"
+	)
+	assert_almost_eq(
+		field._scope_zoom, TestField.SCOPE_ZOOM_DEFAULT, 0.001, "没开镜时滚轮不能改倍率"
+	)
+	# 开镜：滚轮改倍率，视野 = 腰射视野 ÷ 倍率
+	field._scoped = true
+	field.zoom_wheel(5)
+	var zoom := field._scope_zoom
+	assert_true(zoom > TestField.SCOPE_ZOOM_DEFAULT, "开镜后往前滚 = 倍率变大")
+	assert_almost_eq(
+		field.target_fov(), TestField.scoped_fov(hip, zoom), 0.001, "开镜视野 = 腰射视野 ÷ 倍率"
+	)
+	# 收镜 → 再开镜：倍率记住上次的，腰射视野也留着
+	field._scoped = false
+	assert_almost_eq(field.target_fov(), hip, 0.001, "收镜回到腰射视野")
+	field.zoom_wheel(-1)
+	hip = field._fov                   # 收镜时滚轮改的是腰射视野（不是倍率）
+	assert_almost_eq(field._scope_zoom, zoom, 0.001, "收镜时滚轮不能改倍率")
+	field._scoped = true
+	assert_almost_eq(field._scope_zoom, zoom, 0.001, "再次开镜要记住上次的倍率")
+	assert_almost_eq(
+		field.target_fov(), TestField.scoped_fov(hip, zoom), 0.001,
+		"再次开镜的视野 = 腰射视野 ÷ 上次的倍率"
+	)
+	field.free()
+
+
+## 视野不是"咔"一下跳过去的：`_update_camera_fov()` 每帧朝 `target_fov()` 推，
+## 几帧内到位（推不到会一直停在中途；推过头会来回抖）。
+func test_camera_fov_glides_to_the_target() -> void:
+	var field := TestField.new()
+	var camera := Camera3D.new()
+	field._camera = camera
+	field._scoped = true
+	field._scope_zoom = TestField.SCOPE_ZOOM_MAX
+	var target := field.target_fov()
+	assert_true(target < TestField.CAMERA_FOV - 1.0, "16 倍镜的视野要明显比腰射窄")
+	for _i in range(30):
+		field._update_camera_fov(0.02)
+	assert_almost_eq(camera.fov, target, 0.01, "0.6 秒内应该到目标视野")
+	# 收镜：几帧内回到腰射视野
+	field._scoped = false
+	for _i in range(30):
+		field._update_camera_fov(0.02)
+	assert_almost_eq(camera.fov, field._fov, 0.01, "收镜要回到腰射视野")
+	camera.free()
+	field.free()
+
+
+## 鼠标灵敏度要跟着视野缩放（用户 2026-10-18 要求）：视野减半时，同样鼠标位移转过的角度
+## 大约减半 —— 不缩放的话 16 倍镜下"轻轻一动画面就飞出去"，瞄准手感完全没法用。
+## 用的是 tan(FOV/2) 的比例（投影缩放本身是 1/tan），所以屏幕像素/鼠标计数恒定。
+func test_look_sensitivity_follows_zoom() -> void:
+	# 参考视野（`CAMERA_FOV`，现在 53°）= 1.0：设置里那条滑条标定的就是它
+	var reference := TestField.CAMERA_FOV
+	assert_almost_eq(TestField.look_sensitivity_scale(reference), 1.0, 0.0001, "默认视野不缩放")
+	# 2 倍镜（视野 = 默认 / 2）：tan(fov/4)/tan(fov/2) ≈ 0.45
+	var at_2x := TestField.look_sensitivity_scale(TestField.scoped_fov(reference, 2.0))
+	assert_true(at_2x > 0.4 and at_2x < 0.5, "2 倍镜灵敏度应约为原来的一半：%.3f" % at_2x)
+	# 16 倍镜：约 0.055
+	var at_16x := TestField.look_sensitivity_scale(TestField.scoped_fov(reference, 16.0))
+	assert_true(at_16x < 0.06, "16 倍镜灵敏度要非常低：%.4f" % at_16x)
+	# 视野越大越灵敏；单调
+	assert_true(
+		TestField.look_sensitivity_scale(100.0) > 1.0, "视野比默认更广 → 更灵敏"
+	)
+	assert_true(
+		TestField.look_sensitivity_scale(TestField.CAMERA_FOV_MIN) > at_2x,
+		"视野略窄 → 比 2 倍镜灵敏"
+	)
+	# 极端倍率也不能变成 0（否则鼠标像卡住）
+	assert_true(TestField.look_sensitivity_scale(1.0) >= 0.02, "灵敏度保底 0.02")
+
+
+## 倍率滑条是**对数**刻度：2→4→8→16 在滑条上等距（每格滚轮也等距）。
+func test_scope_track_is_logarithmic() -> void:
+	assert_almost_eq(ScopeOverlay.track_ratio(2.0, 2.0, 16.0), 0.0, 0.0001, "最小倍率在底")
+	assert_almost_eq(ScopeOverlay.track_ratio(16.0, 2.0, 16.0), 1.0, 0.0001, "最大倍率在顶")
+	assert_almost_eq(
+		ScopeOverlay.track_ratio(sqrt(2.0 * 16.0), 2.0, 16.0), 0.5, 0.0001, "几何中点在正中"
+	)
+	# 四档刻度必须等距（对数刻度的判据）
+	var step := ScopeOverlay.track_ratio(4.0, 2.0, 16.0) - ScopeOverlay.track_ratio(2.0, 2.0, 16.0)
+	assert_almost_eq(
+		ScopeOverlay.track_ratio(8.0, 2.0, 16.0) - ScopeOverlay.track_ratio(4.0, 2.0, 16.0),
+		step,
+		0.0001,
+		"×2→×4 与 ×4→×8 的间距一样"
+	)
+	assert_almost_eq(ScopeOverlay.track_ratio(100.0, 2.0, 16.0), 1.0, 0.0001, "超出上限夹住")
+	assert_almost_eq(ScopeOverlay.track_ratio(1.0, 2.0, 16.0), 0.0, 0.0001, "低于下限夹住")
+	assert_almost_eq(ScopeOverlay.track_ratio(4.0, 4.0, 4.0), 0.0, 0.0001, "上下限相同别除零")
+
+
+## 开镜遮罩：开镜时淡入、收镜时淡出；测试场每帧同步状态（准星跟着切）。
+func test_scope_overlay_follows_scope_state() -> void:
+	var overlay := ScopeOverlay.new()
+	overlay.set_state(true, 4.0, 2.0, 16.0)
+	assert_almost_eq(overlay.visual_alpha(), 0.0, 0.0001, "刚开镜这一帧还没淡入")
+	assert_eq(float(overlay.get("_target_alpha")), 1.0, "开镜 → 目标不透明度 1")
+	overlay.set_state(false, 4.0, 2.0, 16.0)
+	assert_eq(float(overlay.get("_target_alpha")), 0.0, "收镜 → 目标不透明度 0")
+	overlay.free()
+
+	# 测试场每帧同步：开镜时藏白色准星、收镜时放出来
+	var field := TestField.new()
+	var crosshair := Control.new()
+	field._crosshair = crosshair
+	field._scope_overlay = ScopeOverlay.new()
+	field._scoped = true
+	field._update_scope_view()
+	assert_false(crosshair.visible, "开镜时白色准星要收起来（遮罩里有分划）")
+	field._scoped = false
+	field._update_scope_view()
+	assert_true(crosshair.visible, "收镜后白色准星要回来")
+	field._scope_overlay.free()
+	crosshair.free()
+	field.free()
+
+
+## 后坐冲量：方向 = **枪管反方向**（把车往后推），大小 = 部件文件的 `weapon_recoil_impulse`；
+## 0 = 没后坐（默认，不改变加参数之前的手感）。
+func test_recoil_impulse_points_backwards() -> void:
+	assert_eq(
+		TestField.recoil_impulse_vector(Vector3(0, 0, 1), 100.0), Vector3(0, 0, -100.0),
+		"枪管朝 +z 打 → 车往 -z 推"
+	)
+	assert_eq(
+		TestField.recoil_impulse_vector(Vector3(1, 0, 0), 50.0), Vector3(-50.0, 0, 0),
+		"朝 +x 打 → 往 -x 推"
+	)
+	assert_eq(TestField.recoil_impulse_vector(Vector3(0, 0, 1), 0.0), Vector3.ZERO, "0 = 没后坐")
+	assert_eq(
+		TestField.recoil_impulse_vector(Vector3.ZERO, 100.0), Vector3.ZERO, "没有枪管方向就不推"
 	)
 
 

@@ -118,6 +118,30 @@ static func set_camera_follow(value: bool, path := PATH) -> void:
 	config.save(path)
 
 
+## ── 机库选择：主界面记住"上次选中的那台车" ─────────────────────────────────
+## 存同一个 `settings.cfg`（`[garage] selected_vehicle = ...`）。
+## 切场景回来、甚至退出游戏重开，都会回到那一台，而不是列表最上面的第一台。
+const SECTION_GARAGE := "garage"
+const KEY_SELECTED_VEHICLE := "selected_vehicle"
+
+## 上次选中的载具 id；没存过 / 读不到 → 空串（调用方自己退回第一台）。
+static func selected_vehicle(path := PATH) -> String:
+	var config := ConfigFile.new()
+	if config.load(path) != OK:
+		return ""
+	return str(config.get_value(SECTION_GARAGE, KEY_SELECTED_VEHICLE, ""))
+
+
+## 记住当前选中的载具（主界面每次切车都写一次）。空 id 不写，免得把记录擦掉。
+static func set_selected_vehicle(id: String, path := PATH) -> void:
+	if id.is_empty():
+		return
+	var config := ConfigFile.new()
+	config.load(path)  # 文件不存在就新建
+	config.set_value(SECTION_GARAGE, KEY_SELECTED_VEHICLE, id)
+	config.save(path)
+
+
 ## 丢掉缓存（下次读会重新读文件）。测试用；将来"外部改了配置文件"也用得上。
 static func forget(path := PATH) -> void:
 	_cache.erase(path)
@@ -194,10 +218,10 @@ static func stop_music() -> void:
 		node.call("stop_music")
 
 
-static func play_shot() -> void:
+static func play_shot(pitch := 1.0) -> void:
 	var node := audio()
 	if node != null:
-		node.call("play_shot")
+		node.call("play_shot", pitch)
 
 
 ## 素材强度（`data/audio.txt`）：拿不到 autoload 就返回 0（不报错）
@@ -290,6 +314,14 @@ static func engine_stream() -> AudioStream:
 	if node == null:
 		return null
 	return node.call("engine_stream")
+
+
+## 开火音流（按世界坐标播：距离衰减 + 左右声道，见 scripts/spatial_audio.gd）
+static func shot_stream() -> AudioStream:
+	var node := audio()
+	if node == null:
+		return null
+	return node.call("shot_stream")
 
 
 ## 造一段设置界面（视角灵敏度 + 三个音量滑条）。主界面和建造模式 ESC 菜单共用同一份代码。

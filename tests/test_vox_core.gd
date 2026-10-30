@@ -194,6 +194,56 @@ func test_atlas_has_edge_frame() -> void:
 	assert_true(image.get_pixel(8, 8).is_equal_approx(body), "面中心应是主体色")
 
 
+## 实心范围缓存（`solid_bounds_*`）：它是"进场不卡"的关键 —— 网格化和求包围盒都靠它
+## 跳过整块空体积。这里钉住"设了体素就更新、清了体素也要缩回去"。
+func test_solid_bounds_track_set_voxel() -> void:
+	var volume := VoxVolume.new(Vector3i(8, 8, 8))
+	assert_false(volume.has_solid(), "空体积没有实心范围")
+	assert_eq(volume.outermost_layer(0, true), -1, "空体积最外层应为 -1")
+
+	volume.set_voxel(3, 4, 5, 1)
+	volume.set_voxel(6, 1, 7, 1)
+	assert_true(volume.has_solid(), "写了体素之后应有实心范围")
+	assert_eq(volume.solid_lo(), Vector3i(3, 1, 5), "lo 取各轴最小（含）")
+	assert_eq(volume.solid_hi(), Vector3i(7, 5, 8), "hi 取各轴最大 + 1（不含）")
+	assert_eq(volume.outermost_layer(1, true), 4, "y 最外层 = 最高的实心层")
+	assert_eq(volume.outermost_layer(2, false), 5, "z 最内层 = 最小的实心层")
+
+	volume.set_voxel(6, 1, 7, VoxVolume.EMPTY)
+	assert_eq(volume.solid_hi(), Vector3i(4, 5, 6), "清掉最外面的体素后范围要缩回去")
+
+	# 直接写 `data` 的代码（如 VoxShapes.apply）必须调 invalidate_bounds()
+	volume.data[volume.index(7, 7, 7)] = 1
+	volume.invalidate_bounds()
+	assert_eq(volume.solid_hi(), Vector3i(8, 8, 8), "直接写 data + 失效之后要重算")
+
+
+## 网格化只扫实心范围：小方块摆在 48³ 体积正中，顶点必须都落在方块上，
+## 不能因为"体积有 48 格"就把整个盒子画出来（那样枪管模型会多出一大块空壳）。
+func test_mesher_only_covers_solid_bounds() -> void:
+	var volume := VoxVolume.new(Vector3i(48, 48, 48))
+	var value := volume.index_of_color(Color("c9c9ce"))
+	for z in range(20, 24):
+		for y in range(20, 24):
+			for x in range(20, 24):
+				volume.set_voxel(x, y, z, value)
+	var build := VoxMesher.build(volume, 1.0 / 16.0)
+	var mesh: ArrayMesh = build["mesh"]
+	assert_true(mesh != null, "应产出网格")
+	assert_eq(build["quads"], 6, "实心小方块 = 6 个面")
+	var verts: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	assert_eq(verts.size(), 36, "6 quad = 36 顶点")
+	for vert in verts:
+		var lo := Vector3(20, 20, 20) / 16.0
+		var hi := Vector3(24, 24, 24) / 16.0
+		assert_true(
+			vert.x >= lo.x - 0.001 and vert.x <= hi.x + 0.001
+			and vert.y >= lo.y - 0.001 and vert.y <= hi.y + 0.001
+			and vert.z >= lo.z - 0.001 and vert.z <= hi.z + 0.001,
+			"顶点应只落在实心方块的范围内（实际 %s）" % str(vert)
+		)
+
+
 func test_goxel_export_round_trip() -> void:
 	var volume := _def(PRISM_DEF_PATH).build_volume()
 	var path := "user://prism_export_test.vox.txt"

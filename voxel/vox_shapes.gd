@@ -238,6 +238,55 @@ static func _corner_is_crease(
 	)
 
 
+## 形状的**凸包半空间**（零件本地坐标，`bounds` = 该零件的本地 AABB）。
+##
+## 用途：射界判定（`Turret.segment_blocker()`）不能拿 AABB 当形状 —— 半砖是三角柱，
+## 拿整格方盒去挡，射界会凭空小掉一大块（用户 2026-10-26 报的"射界小了很多"）。
+## 这里把每种形状化成"若干半空间"的交，判定线段是否穿过时做一次区间裁剪即可：
+##   * cube：6 个轴对齐面；
+##   * half_prism_*：4 个轴对齐面 + 1 个对角面（截面三角形的那条斜边）；
+##   * corner_tetra：3 个轴对齐面 + 1 个对角面（x+y+z ≤ n）；
+##   * corner_cut：6 个轴对齐面 + 1 个对角面（x+y+z ≥ n，切掉对角那个角）。
+## 全部是**凸**的，所以 `Plane.normal.dot(p) - d <= 0` 就是"在内部"（法线一律朝**外**）。
+## 法线都做了归一化，这样调用方按 `d` 加余量（`pad`）时单位是"格"。
+static func clip_planes(shape: String, bounds: AABB) -> Array:
+	var lo := bounds.position
+	var hi := bounds.end
+	var planes: Array = []
+	# 轴对齐的 6 个面：法线朝外，所以"x ≥ lo.x"这一面的法线是 (-1,0,0)、d = -lo.x
+	planes.append(Plane(Vector3(-1, 0, 0), -lo.x))
+	planes.append(Plane(Vector3(1, 0, 0), hi.x))
+	planes.append(Plane(Vector3(0, -1, 0), -lo.y))
+	planes.append(Plane(Vector3(0, 1, 0), hi.y))
+	planes.append(Plane(Vector3(0, 0, -1), -lo.z))
+	planes.append(Plane(Vector3(0, 0, 1), hi.z))
+	var size := hi - lo
+	# 体素台阶的**外包络**：斜面对齐到"最后一格的外沿"，这样看得见的台阶永远不会被漏挡
+	# （差 1/16 格，肉眼看不出来）。`corner_cut` 保留到 2n 正好就是 5/6 那个形状。
+	var step := 1.0 / float(VoxVolume.VOXELS_PER_CUBE)
+	if shape == SHAPE_CORNER_TETRA or shape == SHAPE_CORNER_CUT:
+		var n := minf(minf(size.x, size.y), size.z)
+		var base := lo.x + lo.y + lo.z
+		if shape == SHAPE_CORNER_TETRA:
+			# 实心区 = 相对坐标的和 ≤ n（原点那个角是实心的），去掉对角线外侧的 5/6
+			planes.append(Plane(Vector3(1, 1, 1).normalized(), (base + n + step) / sqrt(3.0)))
+		else:
+			# corner_cut = 立方体减去对角那一小块（5/6）：相对坐标的和 ≤ 2n
+			planes.append(Plane(Vector3(1, 1, 1).normalized(), (base + 2.0 * n) / sqrt(3.0)))
+		return planes
+	var layout := default_layout(shape)
+	if layout["half"]:
+		# 截面是"直角边在 -u / -w 上"的三角形：相对坐标 u + w ≤ n
+		var axes: Vector2i = layout["section_axes"]
+		var n := minf(size[axes.x], size[axes.y])
+		var normal := Vector3.ZERO
+		normal[axes.x] = 1.0
+		normal[axes.y] = 1.0
+		var d := n + step + lo[axes.x] + lo[axes.y]
+		planes.append(Plane(normal.normalized(), d / sqrt(2.0)))
+	return planes
+
+
 ## 把形状 + 配色写进体积。返回实心体素数。
 static func apply(
 	volume: VoxVolume,
@@ -255,6 +304,8 @@ static func apply(
 			continue
 		volume.data[i] = edge_index if crease[i] == 1 else body_index
 		solid += 1
+	# 这里是直接写 `data`（绕过了 `set_voxel()`），实心范围缓存要手动失效
+	volume.invalidate_bounds()
 	return solid
 
 

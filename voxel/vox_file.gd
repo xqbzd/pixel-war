@@ -36,19 +36,31 @@ static func load_vox(path: String, size: Vector3i) -> Dictionary:
 			+ "要分开用请在部件实验室里用 [ / ] 选子模型，再按 G 分别生成部件"
 		)
 	var model: Dictionary = models[0]
+	var built := volume_of_model(model, size, result["palette"])
+	warnings.append_array(built["warnings"])
+	built["warnings"] = warnings
+	return built
+
+
+## 从 `load_vox_models()` 里取出的**单个子模型**建一块体积（体素保持它自己的 0 基坐标）。
+## 单模型部件走 `load_vox()`（= 第 0 个子模型）；"一个 .vox 里画了多个物体"的
+## 武器 / 轮体走这里，按子模型序号各取各的。
+static func volume_of_model(model: Dictionary, size: Vector3i, palette: Array) -> Dictionary:
+	var warnings := []
 	var model_size: Vector3i = model["size"]
-	# 注意用"偏移 + 尺寸"（场景里的实际范围），而不是归一化后的包围盒尺寸
-	var extent: Vector3i = (model["offset"] as Vector3i) + model_size
-	if size.x < extent.x or size.y < extent.y or size.z < extent.z:
+	# 裁不裁只看**包围盒尺寸**：体素在 load_vox_models() 里已经归一到 0 基，
+	# 作者把物体画在画布哪个角落都不影响它落在部件盒里的位置（摆哪儿由 model_offset 决定）。
+	# ⚠️ 别拿"场景偏移 + 尺寸"来比：物体画在画布边上会被误报成"超框"。
+	if size.x < model_size.x or size.y < model_size.y or size.z < model_size.z:
 		warnings.append(
 			"模型比部件体积大（模型 %s，部件 %s）—— 超出的部分被裁掉了，把 cubes 调大一点"
-			% [str(extent), str(size)]
+			% [str(model_size), str(size)]
 		)
 	var volume := VoxVolume.new(size)
-	# 直接替换调色板：result 里的调色板已经含 index 0 = 透明，
+	# 直接替换调色板：palette 里的索引就是 .vox 里的颜色索引，
 	# 再 append 会让所有颜色索引整体偏移，颜色全错。
 	volume.palette.clear()
-	for colour in result["palette"]:
+	for colour in palette:
 		volume.palette.append(colour)
 	while volume.palette.size() < 2:
 		volume.palette.append(Color.WHITE)

@@ -6,6 +6,7 @@
 
 name = 角四面体 / Corner Tetrahedron
 
+category  = 结构
 shape     = corner_tetra
 cubes     = 1 1 1
 render    = voxel

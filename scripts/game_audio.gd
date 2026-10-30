@@ -64,6 +64,11 @@ func engine_stream() -> AudioStream:
 	return _load_stream(ENGINE_PATH, true)
 
 
+## 机枪开火音流（项目里现在按**世界坐标**播：每发按距离衰减 + 左右声道，见 spatial_audio.gd）。
+func shot_stream() -> AudioStream:
+	return _load_stream(SHOT_PATH)
+
+
 func play_music(stream_path := MUSIC_PATH) -> void:
 	if _music == null:
 		return
@@ -94,5 +99,6 @@ func play_sfx(stream_path: String, volume_db := 0.0, pitch := 1.0) -> void:
 
 ## 机枪开火音（测试场里每发调一次）。响度取 `data/audio.txt` 的 `shot`，
 ## 音高每发随机抖一点（不然连射听着像电子音）。
-func play_shot() -> void:
-	play_sfx(SHOT_PATH, GameSettings.audio_strength("shot"), randf_range(0.94, 1.06))
+func play_shot(pitch := 1.0) -> void:
+	# `pitch` 来自部件文件的 `weapon_pitch`（重机枪 0.78 → 更低沉）
+	play_sfx(SHOT_PATH, GameSettings.audio_strength("shot"), randf_range(0.94, 1.06) * pitch)

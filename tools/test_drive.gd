@@ -20,7 +20,7 @@ extends SceneTree
 ## 可用加速度 = 驱动轮数 × wheel_engine_force / 整车质量。可用的比门槛大，一给油就抬头。
 
 const PART_DIR := "res://data/parts"
-const AXLE_ID := "wheel_axle_2x2"
+const AXLE_ID := "toy_wheel_2x2"
 ## {length: 车身长度（格）}。两个都跑：短车大概率翘头，长车才是"能开"的对照。
 const CAR_LENGTHS := [3, 6]
 

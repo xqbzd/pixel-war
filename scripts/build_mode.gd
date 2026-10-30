@@ -49,8 +49,10 @@ static var pending_vehicle := {}
 var _library := PartLibrary.new()
 var _grid := BuildGrid.new()
 var _defs := {}
-var _part_ids := []
-var _index := 0
+## 物品栏（10 格）。规则层是 voxel/part_loadout.gd（纯逻辑，被 tests/test_part_loadout.gd 守着），
+## 界面是 scripts/part_picker.gd —— 这个脚本只当"中间人"。
+var _loadout := PartLoadout.new()
+var _picker: PartPicker
 var _roll := 0
 var _yaw := SPAWN_YAW
 var _pitch := SPAWN_PITCH
@@ -83,6 +85,9 @@ var _joint_markers: MultiMeshInstance3D
 var _holo_sub: MeshInstance3D
 var _aim_key := ""  # 上一次瞄准的输入指纹（用来跳过重复的 plan()）
 var _grid_epoch := 0  # 场地改动计数：建/拆/整体移动后自增，用来作废瞄准缓存
+## 连接点/基准格标记的"脏"标记 + 下次允许重建的时间（限流：拆零件时不每块都全量重扫）
+var _markers_dirty := false
+var _markers_due := 0
 var _hud_text := ""
 var _pp_bar: Control
 var _pp_fill: ColorRect
@@ -95,8 +100,6 @@ var _robot_reason := ""
 var _robot_checked := false
 var _hud: Label
 var _crosshair: Control
-var _hotbar_slots := []
-var _hotbar_labels := []
 var _ghost_materials := {}  # part_id -> 半透明材质（按部件缓存，别每帧 duplicate）
 var _notice := ""  # 临时提示（整体移动失败原因 / 中键拾取结果）
 var _notice_until := 0
@@ -119,11 +122,12 @@ func _ready() -> void:
 	GameSettings.play_music()   # 建造模式继续放同一首（跨场景不断）
 	_defs = _library.defs
 	_grid.set_defs(_defs)
-	_part_ids = _library.ids()
+	# 物品栏预填：按 order 排的前 10 个零件（原来的物品栏就是"全部零件"，现在只有 10 格）
+	_loadout.fill_from(_library.ids())
 	_build_world()
 	_build_viewmodel()
 	_build_hud()
-	_build_hotbar()
+	_build_picker()
 	_build_markers()
 	_apply_pending_vehicle()
 	_build_wall()
@@ -143,9 +147,10 @@ func _apply_pending_vehicle() -> void:
 		_vehicle_name = DEFAULT_VEHICLE_NAME
 	if _vehicle_id.is_empty():
 		return
-	var path := "%s/%s.vehicle.txt" % [VEHICLE_DIR, _vehicle_id]
-	if not FileAccess.file_exists(path):
-		_set_notice("找不到 %s" % path)
+	# 载具文件可能在工程目录（自带车）也可能在 user://（玩家改过的）：交给 VehicleStore 找
+	var path := VehicleStore.find_path(_vehicle_id)
+	if path.is_empty():
+		_set_notice("找不到载具文件 %s（工程目录和 user:// 都没有）" % _vehicle_id)
 		return
 	var vehicle := VehicleDef.from_text(FileAccess.get_file_as_string(path), path)
 	# 万一有零件的网格会探出场地（轮轴的轮体会往下探、载具又贴在最底下），
@@ -283,6 +288,9 @@ func _add_menu_button(parent: Node, text: String, handler: Callable) -> void:
 
 
 func _open_escape_menu() -> void:
+	# 零件菜单和这个菜单不能同时开着（都抢鼠标）
+	if _picker != null:
+		_picker.set_menu_open(false)
 	_menu_open = true
 	_escape_layer.visible = true
 	_menu_hide_settings()
@@ -358,7 +366,9 @@ func _save_vehicle() -> Dictionary:
 		return {"ok": false, "reason": "没有零件"}
 	if _vehicle_id.is_empty():
 		_vehicle_id = _next_vehicle_id()
-	var path := "%s/%s.vehicle.txt" % [VEHICLE_DIR, _vehicle_id]
+	# 导出版里 res:// 只读：写入目录由 VehicleStore 决定（导出 = user://，编辑器 = 工程目录）
+	VehicleStore.ensure_write_dir()
+	var path := VehicleStore.path_for(_vehicle_id)
 	var result := VehicleDef.write_file(path, _vehicle_name, entries)
 	# 保存时顺手做一次"能不能进测试场"的判定（顺带把结论刷到 HUD 上）。
 	# 这是用户要的：判定只在**保存 / 去测试场**时做，不在每次改动时做。
@@ -386,10 +396,8 @@ func _refresh_robot_status() -> Dictionary:
 
 
 func _next_vehicle_id() -> String:
-	var index := 1
-	while FileAccess.file_exists("%s/custom_%d.vehicle.txt" % [VEHICLE_DIR, index]):
-		index += 1
-	return "custom_%d" % index
+	# 两个目录都查（工程自带 + user://），绝不覆盖已有的车
+	return VehicleStore.next_id()
 
 
 func _build_world() -> void:
@@ -535,16 +543,35 @@ func _marker_sphere() -> SphereMesh:
 	return mesh
 
 
+## 标记表重建。
+## ⚠️ 每个零件的标记（基准点 + 连接点）**只跟它自己的几何有关**：`claims_face()` 和
+## `face_is_internal()` 都只吃 def / basis / transform，不看别的零件。所以**算一次就存进
+## entry**（`_entry_markers`），之后每次重建只是把缓存拼起来。
+## 以前每次都是全场重算 —— 360 件时实测 11.2 ms，而拆一块零件就会把标记表标脏，
+## 于是"删零件卡一下"。Robocraft 编辑时也只动受影响的方块。
 func _rebuild_markers() -> void:
 	if _anchor_markers == null or _joint_markers == null:
 		return
 	var anchors := []
 	var joints := []
 	for entry: Dictionary in _grid.parts:
-		anchors.append(Vector3(entry.get("anchor", entry["origin"])) + Vector3(0.5, 0.5, 0.5))
-		var def: PartDef = _defs.get(entry["part_id"])
-		if def == null:
-			continue
+		var data := _entry_markers(entry)
+		anchors.append(data["anchor"])
+		joints.append_array(data["joints"])
+	_fill_markers(_anchor_markers, anchors)
+	_fill_markers(_joint_markers, joints)
+
+
+## 单个零件的标记（缓存进 entry，零件被拆掉时跟着 entry 一起消失）。
+## 缓存带签名：整车平移（`_grid.translate_all`）会改 origin/transform，缓存要跟着失效。
+func _entry_markers(entry: Dictionary) -> Dictionary:
+	var signature := [entry["origin"], entry["transform"]]
+	if entry.has("_markers") and (entry["_markers"] as Dictionary).get("sig") == signature:
+		return entry["_markers"]
+	var anchor := Vector3(entry.get("anchor", entry["origin"])) + Vector3(0.5, 0.5, 0.5)
+	var joints := []
+	var def: PartDef = _defs.get(entry["part_id"])
+	if def != null:
 		var basis: Basis = entry["basis"]
 		var transform: Transform3D = entry["transform"]
 		for c in BuildGrid.cells_of(def, basis, entry["origin"]):
@@ -554,15 +581,23 @@ func _rebuild_markers() -> void:
 				if _grid.face_is_internal(def, transform, c, dir):
 					continue  # 自己身体里的面不是连接点
 				joints.append(Vector3(c) + Vector3(0.5, 0.5, 0.5) + Vector3(dir) * 0.5)
-	_fill_markers(_anchor_markers, anchors)
-	_fill_markers(_joint_markers, joints)
+	var data := {"anchor": anchor, "joints": joints, "sig": signature}
+	entry["_markers"] = data
+	return data
 
 
+## 写标记实例：**不缩 `instance_count`**（改它要重新分配 GPU 缓冲，删零件时会 stall），
+## 只在需要变大时扩容，其余时候只改 `visible_instance_count`。
 func _fill_markers(node: MultiMeshInstance3D, positions: Array) -> void:
 	var multi := node.multimesh
-	multi.instance_count = positions.size()
-	for i in positions.size():
+	if multi == null:
+		return
+	var needed := positions.size()
+	if needed > multi.instance_count:
+		multi.instance_count = needed
+	for i in needed:
 		multi.set_instance_transform(i, Transform3D(Basis(), positions[i]))
+	multi.visible_instance_count = needed
 
 
 ## 像素风建造枪（右下角手持）+ 枪上方悬浮的当前零部件。
@@ -701,56 +736,40 @@ func _build_hud() -> void:
 		_crosshair.add_child(tick)
 
 
-## 底部物品栏：像 MC 那样按 1..9 切部件，当前槽高亮。
-func _build_hotbar() -> void:
-	var centre := CenterContainer.new()
-	centre.name = "Hotbar"
-	centre.anchor_left = 0.0
-	centre.anchor_right = 1.0
-	centre.anchor_top = 1.0
-	centre.anchor_bottom = 1.0
-	centre.offset_top = -86.0
-	centre.offset_bottom = -34.0
-	centre.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(centre)
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 8)
-	centre.add_child(row)
-	for i in range(_part_ids.size()):
-		var slot := PanelContainer.new()
-		slot.custom_minimum_size = Vector2(120.0, 48.0)
-		var label := Label.new()
-		label.text = "%d  %s" % [i + 1, _short_name(_part_ids[i])]
-		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		label.add_theme_font_size_override("font_size", 13)
-		slot.add_child(label)
-		row.add_child(slot)
-		_hotbar_slots.append(slot)
-		_hotbar_labels.append(label)
-	_refresh_hotbar()
+## 零件选择界面：底部 10 格物品栏 + Tab 呼出的零件菜单。
+## 界面细节全在 scripts/part_picker.gd（那里只管画和拖），这里只接信号。
+func _build_picker() -> void:
+	_picker = PartPicker.new()
+	add_child(_picker)
+	_picker.setup(_library, _loadout)
+	_picker.slot_selected.connect(_on_slot_changed)
+	_picker.slot_changed.connect(_on_slot_changed)
+	_picker.menu_toggled.connect(_on_menu_toggled)
+	_picker.notify.connect(_set_notice)
+
+
+## 选中格变了 / 格子内容变了：手上的模型、虚影、HUD 都要跟着来一遍。
+## 瞄准缓存不用手动作废 —— `_aim()` 的指纹里带了零件 id，换了零件指纹自然就变了。
+func _on_slot_changed(_index: int) -> void:
+	_refresh_holo()
+	_update_hud()
+
+
+## 菜单开着的时候要拖拽，所以把鼠标交还给玩家；关掉再锁回去。
+func _on_menu_toggled(open: bool) -> void:
+	if Engine.is_editor_hint():
+		return
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if open else Input.MOUSE_MODE_CAPTURED
+
+
+## 物品栏格子在提示文字里的编号：第 10 格显示成 0（和键盘上那排一致）。
+func _slot_label(index: int) -> String:
+	return str((index + 1) % 10)
 
 
 func _short_name(part_id: String) -> String:
 	var def: PartDef = _defs.get(part_id)
-	if def == null:
-		return part_id
-	return def.display_name.split(" / ")[0]
-
-
-func _refresh_hotbar() -> void:
-	for i in range(_hotbar_slots.size()):
-		var selected := i == _index
-		var style := StyleBoxFlat.new()
-		style.set_corner_radius_all(6)
-		style.bg_color = Color(0.43, 0.66, 1.0, 0.28) if selected else Color(0.08, 0.09, 0.12, 0.82)
-		style.border_color = Color(0.43, 0.66, 1.0) if selected else Color(1.0, 1.0, 1.0, 0.14)
-		style.set_border_width_all(2 if selected else 1)
-		style.set_content_margin_all(6.0)
-		_hotbar_slots[i].add_theme_stylebox_override("panel", style)
-		_hotbar_labels[i].add_theme_color_override(
-			"font_color", Color(1, 1, 1) if selected else Color(0.76, 0.79, 0.85)
-		)
+	return part_id if def == null else def.short_name()
 
 
 # ---------------------------------------------------------------- 输入
@@ -763,6 +782,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		_pitch = clampf(_pitch - event.relative.y * LOOK_SPEED, -89.0, 89.0)
 		_apply_camera()
 	elif event is InputEventMouseButton and event.pressed:
+		# 零件菜单开着：鼠标在界面上（滚轮别转零件，左右键也别建造 —— 那是给拖拽用的）
+		if _picker != null and _picker.is_menu_open():
+			return
 		match event.button_index:
 			MOUSE_BUTTON_LEFT:
 				# 鼠标没锁定时先收回控制权，锁定时才是建造
@@ -793,6 +815,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		if event.keycode >= KEY_1 and event.keycode <= KEY_9:
 			_select_slot(int(event.keycode) - int(KEY_1))
+		elif event.keycode == KEY_0:
+			_select_slot(9)   # 第 10 格挂在 0 上
 		elif event.keycode == KEY_R:
 			_rotate(1)
 		elif event.keycode == KEY_M:
@@ -800,7 +824,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.keycode == KEY_O:
 			_toggle_com_marker()
 		elif event.keycode == KEY_ESCAPE:
-			if _menu_open:
+			if _picker != null and _picker.is_menu_open():
+				_picker.set_menu_open(false)
+			elif _menu_open:
 				_close_escape_menu()
 			else:
 				_open_escape_menu()
@@ -814,6 +840,11 @@ func _process(delta: float) -> void:
 	if not Engine.is_editor_hint():
 		_fly(delta)
 	_aim()
+	# 标记整表重建限流（见 `_rebuild_parts()`）：最多 6 Hz，拆零件时不会卡
+	if _markers_dirty and Time.get_ticks_msec() >= _markers_due:
+		_markers_dirty = false
+		_markers_due = Time.get_ticks_msec() + 160
+		_rebuild_markers()
 	_update_com_marker()
 	_update_hud()
 
@@ -883,9 +914,8 @@ func _apply_camera() -> void:
 # ---------------------------------------------------------------- 建造
 
 func _current_def() -> PartDef:
-	if _part_ids.is_empty():
-		return null
-	return _defs.get(_part_ids[_index])
+	# 空格子返回 null（= 手上没东西），下面每个用到的地方都要能接受 null
+	return _defs.get(_loadout.selected_part())
 
 
 ## 滚轮 / R：绕默认连接点所在的轴旋转当前部件（默认连接点始终留在底部那一侧）
@@ -895,19 +925,24 @@ func _rotate(step: int) -> void:
 	_update_hud()
 
 
-## 数字键 1..9：像 MC 物品栏一样切换部件
+## 数字键 1..0 / 点物品栏格子：切换物品栏里的一格
 func _select_slot(slot: int) -> void:
-	if slot < 0 or slot >= _part_ids.size():
+	if _picker == null:
 		return
-	_index = slot
-	_refresh_holo()
-	_refresh_hotbar()
-	_update_hud()
+	_picker.select(slot)
 
 
 func _refresh_holo() -> void:
 	var def := _current_def()
-	if def == null or _holo == null:
+	if _holo == null:
+		return
+	if def == null:
+		# 空格子：手上什么都不拿
+		_holo.mesh = null
+		_holo.material_override = null
+		if _holo_sub != null:
+			_holo_sub.mesh = null
+			_holo_sub.visible = false
 		return
 	# 用零件自己的模型与材质（不再用蓝色投影），并且不随滚转档位转动
 	var build := _library.build_default(def.id)
@@ -929,12 +964,12 @@ func _aim() -> void:
 	# 瞄准的「输入」没变就不用重算：射线沿同一个小面滑动时格子/朝向/拾取的零件都一样，
 	# 这时候 plan() 的结果必然也一样 —— 省下的正是每帧最贵的那一段。
 	# 镜像状态也在里面：开关镜像、挪对称面都必须让缓存作废
-	var key := "%s|%s|%s|%s|%d|%d|%d|%d|%d" % [
+	var key := "%s|%s|%s|%s|%s|%d|%d|%d|%d" % [
 		_hit.get("type", "none"),
 		_hit.get("cell", ""),
 		_hit.get("dir", ""),
 		_hit.get("part_id", ""),
-		_index,
+		_loadout.selected_part(),   # 手上的零件（空格子 = 空串）也是指纹的一部分
 		_roll,
 		_grid_epoch,
 		int(_mirror_on),
@@ -944,6 +979,13 @@ func _aim() -> void:
 		return
 	_aim_key = key
 	var def := _current_def()
+	if def == null:
+		# 空格子：没有东西可规划，虚影全收起来
+		_mirror_plan = {}
+		_candidate = {}
+		_show_ghost({}, null, false)
+		_show_ghost({}, null, true)
+		return
 	if _mirror_on:
 		# 镜像模式：本体 + 镜像体一起规划（镜像体放不下就两个都不给）
 		_mirror_plan = _grid.plan_mirror(def, _hit, _roll, _mirror_half, true)
@@ -1036,7 +1078,9 @@ func _sub_ghost_material(part_id: String, invalid := false, mirror := false) -> 
 func _try_build() -> void:
 	var def := _current_def()
 	if def == null:
+		_set_notice("物品栏这一格是空的：Tab 打开零件菜单，把零件拖进来")
 		return
+	var parts_before: int = _grid.parts.size()
 	if not _mirror_on:
 		if _candidate.is_empty():
 			return
@@ -1045,7 +1089,8 @@ func _try_build() -> void:
 			return
 		if _grid.place_plan(def, _candidate)["ok"]:
 			_built += 1
-			_rebuild_parts()
+			# 只把新放的那一件追加进去（以前整表重建，零件一多每放一块都卡一下）
+			_append_parts(parts_before)
 		return
 	# 镜像模式：本体和镜像体各放各的 —— 谁违规就不放谁，另一边照放
 	if _mirror_plan.is_empty():
@@ -1058,7 +1103,7 @@ func _try_build() -> void:
 		_set_notice("这里放不下：%s" % str(result.get("reason", "")))
 		return
 	_built += 1
-	_rebuild_parts()
+	_append_parts(parts_before)
 	if int(result["placed"]) == 1:
 		# 只落了一边：把另一边被拒的理由说清楚
 		if not bool(_mirror_plan.get("place_body", false)):
@@ -1108,21 +1153,34 @@ func _move_mirror(step: int, echo := false) -> void:
 func _try_remove() -> void:
 	if _hit.is_empty() or _hit.get("type", "none") != "part":
 		return
+	var part_id := str(_hit.get("part_id", ""))
 	if _mirror_on:
-		# 镜像拆除：连镜像位置那一个零件一起拆
-		var result := _grid.remove_with_mirror(
-			_hit["cell"], str(_hit.get("part_id", "")), _mirror_half
-		)
+		# 拆除前先把"要拆的那一件"记下来（拆完就找不到它了），拆完只从 MultiMesh 里挪掉这几件
+		var victim: Dictionary = _grid.victim_at(_hit["cell"], part_id)
+		var partner := {}
+		if not victim.is_empty():
+			var anchor: Vector3i = victim.get("anchor", victim["origin"])
+			partner = _grid.entry_by_anchor(
+				_grid.mirror_cell(anchor, _mirror_half), str(victim["part_id"])
+			)
+		var result := _grid.remove_with_mirror(_hit["cell"], part_id, _mirror_half)
 		if int(result["removed"]) > 0:
 			_built = maxi(0, _built - int(result["removed"]))
 			if bool(result["mirrored"]):
 				_set_notice("镜像拆除：对称位置那一个也拆了")
-			_rebuild_parts()
+			var removed := []
+			if not victim.is_empty():
+				removed.append(victim)
+			if not partner.is_empty() and not is_same(partner, victim):
+				removed.append(partner)
+			_remove_parts(removed)
 		return
 	# 多零件共享格子时，拆的必须是射线真正打中的那一个
-	if _grid.remove(_hit["cell"], str(_hit.get("part_id", ""))):
+	var target: Dictionary = _grid.victim_at(_hit["cell"], part_id)
+	if _grid.remove(_hit["cell"], part_id):
 		_built = maxi(0, _built - 1)
-		_rebuild_parts()
+		_remove_parts([target])
+
 
 
 ## 中键点零件 = 把当前建造部件切成它（像 MC 的拾取方块）。
@@ -1135,11 +1193,28 @@ func _pick_part() -> void:
 		if entry == null:
 			return
 		part_id = str(entry["part_id"])
-	var index := _part_ids.find(part_id)
-	if index < 0:
+	if not _defs.has(part_id):
 		return
-	_select_slot(index)
-	_set_notice("已切换到 %s" % _short_name(part_id))
+	# 三条规则（已有就跳过去 / 有空位就放进去 / 全满就顶掉当前格）都在 PartLoadout 里，
+	# 那边是纯逻辑、有测试；这里只负责把它变成人话提示。
+	var result := _loadout.pick(part_id)
+	var action := str(result["action"])
+	if action == PartLoadout.ACTION_NONE:
+		return
+	_picker.refresh_slots()
+	_on_slot_changed(_loadout.selected)
+	var name := _short_name(part_id)
+	match action:
+		PartLoadout.ACTION_JUMP:
+			_set_notice("已切到 %s 号格的 %s" % [_slot_label(int(result["slot"])), name])
+		PartLoadout.ACTION_FILL:
+			_set_notice(
+				"%s 不在物品栏里：放进 %s 号格" % [name, _slot_label(int(result["slot"]))]
+			)
+		PartLoadout.ACTION_REPLACE:
+			_set_notice(
+				"物品栏满了：%s 号格换成 %s" % [_slot_label(int(result["slot"])), name]
+			)
 
 
 ## 方向键 = 载具前后左右（+x 是车头），< / > = 下降 / 上升
@@ -1207,20 +1282,30 @@ func _rebuild_parts() -> void:
 				"build": _library.build_default(entry["part_id"]),
 				"sub": _library.build_sub(entry["part_id"]),
 				"transforms": [],
+				"entries": [],
 			}
 		groups[key]["transforms"].append(entry["transform"])
+		(groups[key]["entries"] as Array).append(entry)
 	var root := Node3D.new()
 	root.name = "PlacedParts"
 	add_child(root)
+	# 记下"每一类零件对应哪几个 MultiMesh 节点"，之后放零件走 `_append_parts()` 增量追加
+	_part_nodes = {}
 	for key in groups.keys():
 		var group: Dictionary = groups[key]
-		var nodes := PartLibrary.make_part_nodes(group["transforms"], group["build"], group["sub"])
+		var nodes := _make_group_nodes(group["transforms"], group["build"], group["sub"])
 		for i in nodes.size():
 			var node: Node3D = nodes[i]
 			node.name = "%s_%d" % [str(key).replace(":", "_"), i]
 			root.add_child(node)
-	# 基准格 / 连接点的调试标记也跟着重建（场地一变它们就得跟着变）
-	_rebuild_markers()
+		_part_nodes[str(key)] = {
+			"nodes": nodes, "build": group["build"], "sub": group["sub"],
+			"entries": group["entries"],
+		}
+	# 基准格 / 连接点标记：整表重算要扫所有零件的所有面（400 件时 ~45 ms！），
+	# 这里只标脏，由 `_process()` 限流重建（拆零件时不会每拆一块卡一下）
+	_markers_dirty = true
+	_markers_due = 0
 
 
 func _default_mode(part_id: String) -> int:
@@ -1262,7 +1347,9 @@ func _update_hud() -> void:
 	_update_stats()
 	var def := _current_def()
 	var aim := "无目标"
-	if not _candidate.is_empty():
+	if def == null:
+		aim = "物品栏这一格是空的：Tab 打开零件菜单选零件"
+	elif not _candidate.is_empty():
 		var where := "地面" if _candidate["kind"] == "floor" else "零件表面"
 		var body_ok := bool(_candidate.get("valid", true))
 		if not _mirror_on:
@@ -1287,7 +1374,9 @@ func _update_hud() -> void:
 			else:
 				aim = "放不下（%s）" % str(_mirror_plan.get("reason", ""))
 	elif _mirror_on and not str(_mirror_plan.get("reason", "")).is_empty():
-		# 零件本身就不支持镜像（非轴对称）：没有虚影可画，但要把原因说清楚
+		# 镜像规划给了整体理由（两边都放不下之类）：没有虚影可画，但把原因说清楚。
+		# 注意：镜像性不由代码判定（见 BuildGrid.mirror_fold_rotation），所以这里
+		# 不会再出现"这个零件不支持镜像"那种理由。
 		aim = str(_mirror_plan.get("reason", ""))
 	elif not _hit.is_empty() and _hit.get("type", "none") == "part":
 		if _hit.get("dir", Vector3i.ZERO) == Vector3i.ZERO:
@@ -1299,7 +1388,8 @@ func _update_hud() -> void:
 	lines.append("建造模式 · 场地 64 x 64 x 64")
 	lines.append("WASD 移动 · 空格升 / Shift 降 · 鼠标转向")
 	lines.append("滚轮 / R 旋转部件（绕默认连接点，默认连接点始终在底部）")
-	lines.append("1 / 2 切换部件 · 左键建造 · 右键拆除 · 中键点零件 = 切到该零件")
+	lines.append("Tab 零件菜单 · 1-0 选物品栏 · 左键建造 · 右键拆除")
+	lines.append("中键点零件 = 收进物品栏（已有就切过去 / 有空位就放进去 / 全满顶掉当前格）")
 	lines.append("方向键整体移动载具（+x 是车头）· < 下降 / > 上升")
 	lines.append("调试标记：绿方块 = 基准格 · 小蓝球 = 能对接的连接点")
 	if _com_visible:
@@ -1317,10 +1407,13 @@ func _update_hud() -> void:
 		)
 	else:
 		lines.append("镜像建造：关（M 开启左右对称建造）")
-	lines.append("ESC 解锁鼠标，再按一次回主界面")
+	lines.append("ESC 关零件菜单 / 解锁鼠标（再按一次回主界面）")
 	lines.append("")
 	# 显示名字（车轮（2x2）这种），不显示内部 id —— 文件名是给数据用的
-	lines.append("当前部件：%s" % (_short_name(def.id) if def != null else "-"))
+	lines.append(
+		"当前部件：%s 号格 · %s"
+		% [_slot_label(_loadout.selected), _short_name(def.id) if def != null else "（空）"]
+	)
 	lines.append("朝向档位：%d   已放置：%d" % [_roll, _grid.part_count()])
 	lines.append("瞄准：%s" % aim)
 	if not _notice.is_empty() and Time.get_ticks_msec() < _notice_until:
@@ -1330,3 +1423,189 @@ func _update_hud() -> void:
 		return  # 文字没变就别重排 UI（每帧都重排同样一段文字是白花的时间）
 	_hud_text = text
 	_hud.text = text
+
+## 建造模式：放零件走**增量追加**（不再整表重建），零件多的时候才不会一顿一顿。
+var _part_nodes := {}   # key -> {nodes: Array[MultiMeshInstance3D], build, sub}
+
+
+func _part_key(entry: Dictionary) -> String:
+	return "%s:%d" % [str(entry["part_id"]), _default_mode(str(entry["part_id"]))]
+
+
+## 场地里**新增**了零件（`from_index` 之后的那几件）：只把这几件追加进已有的 MultiMesh，
+## 不重建整张表（以前每放一块都把几百个实例重新塞一遍，零件一多就卡）。
+func _append_parts(from_index: int) -> void:
+	_grid_epoch += 1
+	_robot_checked = false
+	var root := get_node_or_null("PlacedParts")
+	if root == null:
+		_rebuild_parts()
+		return
+	for i in range(from_index, _grid.parts.size()):
+		var entry: Dictionary = _grid.parts[i]
+		var key := _part_key(entry)
+		var transform: Transform3D = entry["transform"]
+		if not _part_nodes.has(key):
+			# 这一类零件还没画过：单独建一组（只有 1 个实例）
+			var build := _library.build_default(str(entry["part_id"]))
+			var sub := _library.build_sub(str(entry["part_id"]))
+			var nodes := _make_group_nodes([transform], build, sub)
+			for index in nodes.size():
+				var node: Node3D = nodes[index]
+				node.name = "%s_%d" % [key.replace(":", "_"), index]
+				root.add_child(node)
+			_part_nodes[key] = {
+				"nodes": nodes, "build": build, "sub": sub, "entries": [entry],
+			}
+			continue
+		_append_group_instance(_part_nodes[key], entry)
+	_append_markers(from_index)
+
+
+## 连接点 / 基准格标记也只**追加**新零件那一件（整表重算在零件多时很贵）。
+func _append_markers(from_index: int) -> void:
+	if _anchor_markers == null or _joint_markers == null:
+		return
+	for i in range(from_index, _grid.parts.size()):
+		var entry: Dictionary = _grid.parts[i]
+		_grow_marker(
+			_anchor_markers, Vector3(entry.get("anchor", entry["origin"])) + Vector3(0.5, 0.5, 0.5)
+		)
+		var def: PartDef = _defs.get(str(entry["part_id"]))
+		if def == null:
+			continue
+		var basis: Basis = entry["basis"]
+		var transform: Transform3D = entry["transform"]
+		for c in BuildGrid.cells_of(def, basis, entry["origin"]):
+			for dir in VoxShapes.AXIS_DIRS:
+				if not _grid.claims_face(def, basis, transform, c, dir):
+					continue
+				if _grid.face_is_internal(def, transform, c, dir):
+					continue
+				_grow_marker(
+					_joint_markers,
+					Vector3(c) + Vector3(0.5, 0.5, 0.5) + Vector3(dir) * 0.5
+				)
+
+
+func _grow_marker(node: MultiMeshInstance3D, at: Vector3) -> void:
+	var multi: MultiMesh = node.multimesh
+	if multi == null:
+		return
+	var needed := multi.visible_instance_count + 1
+	# 改 `instance_count` 会重新分配缓冲：这里**成倍预留**，别每放一块就重分配一次
+	if needed > multi.instance_count:
+		multi.instance_count = maxi(needed, maxi(64, multi.instance_count * 2))
+	multi.set_instance_transform(needed - 1, Transform3D(Basis(), at))
+	multi.visible_instance_count = needed
+
+## 场地里**删掉**了零件：只重建**受影响的那几组**（不是整张表）。
+##
+## ⚠️ 为什么不用"把末尾实例搬过来缩 1"那种做法：MultiMesh 的实例数据在
+## `instance_count` 变化时会**被清空**，swap/缩容很容易和 `entries` 错位 ——
+## 一旦错位就会出"幽灵零件"：格子里还有、外观却没了（或者反过来）。
+## 按组重建是 O(这一组的零件数)，400 块同类零件也只要 ~0.3 ms，换来的是一定对得上。
+func _remove_parts(entries: Array) -> void:
+	_grid_epoch += 1
+	_robot_checked = false
+	# 连接点/基准格标记：整表重算交给 `_process()` 限流做（拆一块不会卡）
+	_markers_dirty = true
+	var root := get_node_or_null("PlacedParts")
+	if root == null:
+		return
+	var affected := {}
+	for entry in entries:
+		affected[_part_key(entry)] = true
+	for key in affected.keys():
+		_rebuild_group(NodePath(str(key)), root)
+
+
+## 重建**一组**零件（同一 part_id + 渲染路线）。
+## ⚠️ 拆零件时**就地改**已有的 MultiMesh（只重写变换 + 缩 `visible_instance_count`），
+## **不再**销毁节点重造：`_make_group_nodes()` 会新建 MultiMesh 并把 `instance_count`
+## 设成容量（等于重新分配 GPU 缓冲），400 件的车里拆一块最常见的方块就要重分配一次。
+## Robocraft 拆掉方块也只是把网格里那一块的顶点关掉，不会重造网格。
+func _rebuild_group(key_path: NodePath, root: Node3D) -> void:
+	var key := str(key_path)
+	var transforms := []
+	var entries := []
+	for entry: Dictionary in _grid.parts:
+		if _part_key(entry) != key:
+			continue
+		transforms.append(entry["transform"])
+		entries.append(entry)
+	var record: Dictionary = _part_nodes.get(key, {})
+	var nodes: Array = record.get("nodes", [])
+	if entries.is_empty():
+		# 这一组全没了：回收节点（只剩 0 个还占着 MultiMesh 节点会漏；同类零件再加回来
+		# 会走下面的新建路径）。只在"拆掉某类最后一件"时发生，常见情况走就地更新。
+		for node in nodes:
+			if is_instance_valid(node):
+				root.remove_child(node)
+				node.queue_free()
+		_part_nodes.erase(key)
+		return
+	if nodes.is_empty():
+		# 这类零件第一次出现（或节点被清掉了）：建节点，含容量预留
+		var part_id := str((entries[0] as Dictionary)["part_id"])
+		var build: Variant = _library.build_default(part_id)
+		var sub: Variant = _library.build_sub(part_id)
+		nodes = _make_group_nodes(transforms, build, sub)
+		for index in nodes.size():
+			var created: Node3D = nodes[index]
+			created.name = "%s_%d" % [key.replace(":", "_"), index]
+			root.add_child(created)
+		_part_nodes[key] = {"nodes": nodes, "build": build, "sub": sub, "entries": entries}
+		return
+	# 已有节点：就地重写实例。只有"变多了"才扩容（扩容会清空缓冲，之后必须重写全部）
+	var needed := transforms.size()
+	for node in nodes:
+		if not is_instance_valid(node) or not (node is MultiMeshInstance3D):
+			continue
+		var multi: MultiMesh = (node as MultiMeshInstance3D).multimesh
+		if multi == null:
+			continue
+		if needed > multi.instance_count:
+			multi.instance_count = needed
+		for i in needed:
+			multi.set_instance_transform(i, transforms[i])
+		multi.visible_instance_count = needed
+	record["entries"] = entries
+	_part_nodes[key] = record
+
+
+## 用给定变换造一组 MultiMesh 节点，并**预留容量**。
+## ⚠️ Godot 里改 `MultiMesh.instance_count` 会**清空所有实例数据**，所以顺序必须是：
+## 先定容量 → 再写变换 → 最后设 `visible_instance_count`。增量放/拆只用
+## `visible_instance_count` 加减，不再动 `instance_count`（动一次就把已画的全清掉 ——
+## 这正是"幽灵零件"的成因：格子有零件、但视觉全被清到原点/消失）。
+func _make_group_nodes(transforms: Array, build: Dictionary, sub: Dictionary) -> Array:
+	var nodes := PartLibrary.make_part_nodes(transforms, build, sub)
+	for node in nodes:
+		var multi: MultiMesh = (node as MultiMeshInstance3D).multimesh
+		var capacity := maxi(64, transforms.size())
+		multi.instance_count = capacity
+		for i in transforms.size():
+			multi.set_instance_transform(i, transforms[i])
+		multi.visible_instance_count = transforms.size()
+	return nodes
+
+
+## 往一组里追加一件：容量够就直接写（只加 visible_instance_count）；不够才扩容并重写全部。
+func _append_group_instance(record: Dictionary, entry: Dictionary) -> void:
+	var entries: Array = record["entries"]
+	var needed := entries.size() + 1
+	for node in (record["nodes"] as Array):
+		var multi: MultiMesh = (node as MultiMeshInstance3D).multimesh
+		if multi.instance_count < needed:
+			var capacity := maxi(64, multi.instance_count * 2)
+			while capacity < needed:
+				capacity *= 2
+			multi.instance_count = capacity     # 会清空：下面把已有变换重写一遍
+			for i in entries.size():
+				multi.set_instance_transform(i, (entries[i] as Dictionary)["transform"])
+			multi.visible_instance_count = entries.size()
+		multi.set_instance_transform(entries.size(), entry["transform"])
+		multi.visible_instance_count = needed
+	entries.append(entry)
+

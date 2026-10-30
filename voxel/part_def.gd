@@ -15,6 +15,10 @@ enum RenderMode { TEXTURE, VOXEL }
 
 const DEFAULT_BODY := "c9c9ce"
 const DEFAULT_EDGE := "8e8e96"
+## 普通子弹的默认颜色（曳光轨迹 + 弹着点火花）：就是改这几个参数之前的那个黄色。
+## 部件文件里写 `weapon_bullet_color = ffd959` 得到的是**完全一样**的颜色
+## （十六进制按 /255 解析，所以代码里也从同一个字符串来，别写成 Color(1.0, 0.85, 0.35)）。
+const DEFAULT_BULLET_COLOR := Color("ffd959")
 ## 世界标定：**1 cube（一格） = 多少米**。2026-10-14 用户要求从 0.2 改成 0.5 ——
 ## 他发现手感问题很大程度上是比例尺问题（车 25 格长，30 m/s 在旧标定下 = 150 格/秒
 ## ≈ 每秒跑 6 个车身长，太快、太贼）。改完这一处，下面这些地方**必须一起动**：
@@ -30,6 +34,30 @@ const EARTH_GRAVITY := 9.8
 ## 模拟里的重力（格/秒²）：**必须和 `project.godot` 里写的那个数一样**（测试守着）。
 const GRAVITY_CUBES := EARTH_GRAVITY / CUBE_METERS
 
+## ── 分类（建造界面的零件菜单按这个分页，见 scripts/part_picker.gd）───────────
+## 数组顺序 = 菜单左侧按钮从上到下的顺序（结构 / 行驶 / 武器 / 辅助 / 特殊）。
+const CATEGORIES := ["structure", "mobility", "weapon", "utility", "special"]
+const CATEGORY_LABELS := {
+	"structure": "结构",
+	"mobility": "行驶",
+	"weapon": "武器",
+	"utility": "辅助",
+	"special": "特殊",
+}
+## 部件文件里 `category = ` 写中文（推荐，和界面上看到的一致）或英文键都认。
+const CATEGORY_ALIASES := {
+	"结构": "structure",
+	"structure": "structure",
+	"行驶": "mobility",
+	"mobility": "mobility",
+	"武器": "weapon",
+	"weapon": "weapon",
+	"辅助": "utility",
+	"utility": "utility",
+	"特殊": "special",
+	"special": "special",
+}
+
 var id := ""
 var display_name := ""
 var shape := VoxShapes.SHAPE_CUBE
@@ -40,6 +68,8 @@ var render_mode: int = RenderMode.VOXEL
 var body_color := Color(DEFAULT_BODY)
 var edge_color := Color(DEFAULT_EDGE)
 var edge_band := 1
+## 分类：建造界面按 Tab 呼出的零件菜单里归到哪一页（不写 = structure 结构）。
+var category := "structure"
 ## 物品栏排序权重（小的在前）；同权重按 id 排。默认 100，方便新部件插到后面。
 var order := 100
 ## 基本数值（用户手动调整）：重量 / 血量 / 部件点数。默认 1kg / 1000 点 / 1pp。
@@ -57,11 +87,15 @@ var model_path := ""
 var connection_override := []
 ## 是否显式写了 connections 这一行（写空值 / none = 明确"这个部件没有连接面"）
 var connections_set := false
-## 随本部件一起生成的浮动附属模型（轮体）：它不是独立可放置部件，
-## 由轮轴带着走，测试场里对应 VehicleWheel3D 的外观。
-var wheel_body := ""
-## 附属子模型的挂载偏移（单位 = 体素，相对零件本地原点，可负）。
-## 轮体也**算碰撞体积**，所以这个偏移同时决定它的网格位置和碰撞盒。
+## 轮体（轮胎）= **我这个 .vox 场景里的第几个子模型**（0 起），轮轴永远是 0 号。
+## 它不是独立可放置部件：由轮轴带着走，测试场里对应驱动轮的外观。`-1` = 这个零件不是轮子。
+##
+## ⚠️ 约定（2026-10-15 起）：**一个零件 = 一个建模文件**。轮体和轮轴画在同一个 .vox 里，
+## 靠子模型序号引用 —— 和武器的 `weapon_yaw_model` / `weapon_pitch_model` 是同一套机制。
+## 好处：两个物体的相对位置由画布说了算（作者画在哪儿就摆哪儿），不用手写偏移。
+var wheel_body_model := -1
+## 轮体位置的**微调**（单位 = 体素，可负）。一般不用写：0 就表示"用画布里的相对位置"
+## （见 `sub_model_offset()`），只有画布位置不合适、又不想动模型时才拿它顶一下。
 var wheel_offset := Vector3i.ZERO
 ## 物理角色："" = 普通部件（刚体）；"wheel" = 测试场里的假轮子（VehicleWheel3D + 像素外观）
 var physics := ""
@@ -70,7 +104,7 @@ var physics := ""
 var model_offset := Vector3i.ZERO
 ## 为容纳负偏移在正方向留出的体素余量（由 model_volume 算出，网格原点与包围盒都用它）
 var model_pad := Vector3i.ZERO
-## ── 轮子参数（只有带 `wheel_body` 的部件用得上）───────────────────────────
+## ── 轮子参数（只有轮子部件用得上，即 `is_wheel()` 为真）────────────────────
 ## 动力：engine_force 是每个驱动轮的推力（N），max_speed 到了就收油（m/s）。
 var wheel_engine_force := 90.0
 var wheel_brake := 60.0
@@ -151,16 +185,47 @@ var weapon_pitch_max := 35.0
 ## ── 开火（转塔用）──────────────────────────────────────────────────────────
 ## ⚠️ **速度一律写真实 m/s**（世界标定 1 cube = CUBE_METERS 米，
 ## 模拟内部用"格"，换算在 `muzzle_speed_cubes()` 里做一次，别在别处再乘一遍）。
-var weapon_projectile := "bullet"   # 射弹类型：目前只有 "bullet"（受重力的点状弹丸）
+var weapon_projectile := "bullet"   # 射弹类型："bullet"（受重力的点状弹丸）/ "ray"（瞬间命中的射线）/ "none"
+## 射线类武器（`weapon_projectile = ray`）的**最大射程**（米）：没有弹速 / 下坠 / 寿命，只有这一条。
+## 没写就是 400 米（= 800 格）。
+var weapon_ray_range := 400.0
 var weapon_muzzle_speed := 120.0    # 子弹初速度，m/s
 var weapon_damage := 12.0           # 每发伤害
 var weapon_rpm := 600.0             # 射速，发/分钟
 var weapon_spread := 1.5            # 初速度的随机角散射，度（±，锥形均匀分布）
 var weapon_traverse_speed := 60.0   # 炮塔最高转速，度/秒（水平、俯仰共用一个）
+## 开火音效的音高倍率（1.0 = 原样；< 1 更低沉，> 1 更清脆）。
+## 所有枪目前共用一个枪声素材，靠这个数值区分音色 —— 重机枪写 0.78 就比轻机枪低沉。
+var weapon_pitch := 1.0
+## **支架（水平旋转部分）要不要独立碰撞盒**：
+## * true  = 支架单独一个会**跟着旋转**的碰撞盒（体积大的炮塔需要，不然会穿模）；
+## * false = 不单独建盒，用**固定的碰撞箱**代替（并进车体的合并盒里）—— 体积小的枪用这个，
+##   省掉"每帧跟着转"的碰撞盒（目前两种机枪都是这类）。
+## 默认 false。以后出更大更复杂的炮塔再在部件文件里打开。
+var weapon_swivel_collider := false
 var weapon_energy_cost := 10.0      # 每发消耗的能量
 ## 弹丸寿命（秒）：打出去多久自动消失。射速 × 寿命 = 同屏最多几发，**这是防卡爆的主要旋钮**
-## （另一道保险是射弹池的硬上限 `Projectiles.MAX_LIVE`）。写 0 会被夹到 0.05 秒、## 上限 120 秒 —— 别用"永不消失"来调手感。
+## （另一道保险是射弹池的硬上限 `Projectiles.MAX_LIVE`）。写 0 会被夹到 0.05 秒、上限 120 秒 ——
+## 别用"永不消失"来调手感。
 var weapon_projectile_life := 8.0
+## ── 弹头（只对普通子弹 `weapon_projectile = bullet` 有效）──────────────────────
+## 四个参数都是"打出去的这一发"自己的属性，由 `Turret` 抄下来交给 `Projectiles.fire()`。
+## 以后加别的弹种（比如爆炸弹）时按同样的方式再加一组同名字段。
+##
+## 后坐冲量：每发把**开火的车自己**往后推多少。冲量 = 质量 × 速度，单位 **kg·格/秒**
+## （= 真实世界的 N·s，只是速度换算成了格/秒）；作用点在枪口，所以偏心装的枪会带一点力矩。
+## 例：一辆 2000 kg 的车，写 100 就是每发给它 0.05 格/秒（0.025 m/s）的后退。
+## 0 = 完全没有后坐（默认，和加这个参数之前一样）。
+var weapon_recoil_impulse := 0.0
+## 冲击冲量：每发打中**别人**时把对方推多少（同上单位，作用点在命中点）。
+## 打在静态地形上没有意义（推不动），只有命中刚体（载具/靶子）才生效。0 = 不推（默认）。
+var weapon_impact_impulse := 0.0
+## 弹头颜色（十六进制，可带 #）：**曳光轨迹 + 弹着点火花**都用它。
+## 默认 `DEFAULT_BULLET_COLOR`（现在的黄色）。写错格式会留一条警告、退回默认色。
+var weapon_bullet_color := DEFAULT_BULLET_COLOR
+## 距离衰减：每飞 100 米损失多少**伤害比例**（0.1 = 每百米 -10%；1.0 = 百米外就没伤害了）。
+## 按真实米数算（`CUBE_METERS` 换算），夹在 0~1；0 = 不衰减（默认）。
+var weapon_damage_falloff := 0.0
 ## ── 能量（核心提供）────────────────────────────────────────────────────────
 ## 整车武器共用一口能量池：上限 + 每秒恢复。不是核心的零件写这两个没有意义。
 var energy_max := 0.0
@@ -168,6 +233,11 @@ var energy_regen := 0.0
 var source_path := ""
 var warnings: PackedStringArray = PackedStringArray()
 var _model_volume: VoxVolume = null
+## 碎片颜色缓存（见 `debris_colour()` / `debris_palette()`）
+var _debris_colour := Color(0.7, 0.7, 0.7)
+var _debris_colour_cached := false
+var _debris_palette := PackedColorArray()
+var _debris_palette_cached := false
 var _model_mtime := 0
 var _sub_volume: VoxVolume = null
 var _sub_mtime := 0
@@ -175,6 +245,11 @@ var _scene_models := []      # .vox 场景里的全部子模型（武器零件�
 var _scene_palette := []
 var _scene_mtime := 0
 var _weapon_volumes := {}      # 子模型序号 -> VoxVolume（缓存，见 weapon_volume()）
+## 转塔几何（枪管轴线 / 回转中心 / 转点）的缓存：只跟模型有关，装几台转塔都只算一次。
+var _weapon_geom_ready := false
+var _barrel_axis := {}
+var _yaw_center := Vector2.ZERO
+var _pivot_info := {}
 var _bounds := AABB()
 var _bounds_ready := false
 var _body := AABB()
@@ -206,6 +281,24 @@ static func from_text(text: String, path := "") -> PartDef:
 
 func mode_name() -> String:
 	return "texture" if render_mode == RenderMode.TEXTURE else "voxel"
+
+
+## 界面上显示的短名字。部件文件里的 `name` 写成"中文 / English"，
+## 界面取前半段 —— 文件名 / id 是给数据用的，不给玩家看。
+func short_name() -> String:
+	return display_name.split(" / ")[0]
+
+
+## 是不是"轮子"（测试场里变成一个驱动轮的那种）：写了 `wheel_body_model` 就算。
+## ⚠️ 别自己去看"有没有轮体模型路径"那套老写法 —— 2026-10-15 起一个零件只有一个建模文件，
+## 判断轮子一律问这个函数（build_grid / vehicle / vehicle_rig / test_field 都走它）。
+func is_wheel() -> bool:
+	return wheel_body_model >= 0
+
+
+## 分类在界面上显示的中文名（未知分类原样返回，方便定位写错的部件文件）。
+static func category_label(key: String) -> String:
+	return CATEGORY_LABELS.get(key, key)
 
 
 ## 连接点所在的面（局部空间，轴对齐单位向量）。
@@ -274,35 +367,82 @@ func _shift_volume(volume: VoxVolume, delta: Vector3i) -> VoxVolume:
 
 
 ## 附属子模型（轮体）的体积。它不是独立部件：由所属零件带着走，
-## 测试场里对应 VehicleWheel3D 的外观。体积大小按 .vox 自己的范围向上取整到 cube。
+## 测试场里对应驱动轮的外观。体积大小按模型的实心范围向上取整到 cube。
 func sub_model_volume() -> VoxVolume:
-	if wheel_body.is_empty() or not FileAccess.file_exists(wheel_body):
+	if wheel_body_model < 0:
 		return null
-	var mtime := FileAccess.get_modified_time(wheel_body)
+	return _sub_model_from_scene()
+
+
+## 轮体 = 我自己那个 .vox 场景里的第 N 个子模型（0 号是轮轴）。
+## 和武器同一套机制，区别只有一点：轮体的体素**归一到自己的包围盒**（它要绕自己的中心转），
+## 所以位置要靠 `sub_model_offset()` 补回来（那里用画布里的相对位移）。
+func _sub_model_from_scene() -> VoxVolume:
+	if model_path.is_empty() or not FileAccess.file_exists(model_path):
+		_warn("wheel_body_model = %d，但 model 是空的或文件不存在" % wheel_body_model)
+		return null
+	var mtime := FileAccess.get_modified_time(model_path)
 	if _sub_volume != null and mtime == _sub_mtime:
 		return _sub_volume
-	var size := Vector3i.ONE * VoxVolume.VOXELS_PER_CUBE
-	var models: Array = VoxFile.load_vox_models(wheel_body).get("models", [])
-	if not models.is_empty():
-		var extent: Vector3i = (models[0]["offset"] as Vector3i) + (models[0]["size"] as Vector3i)
-		size = Vector3i(
-			maxi(16, ceili(float(extent.x) / 16.0) * 16),
-			maxi(16, ceili(float(extent.y) / 16.0) * 16),
-			maxi(16, ceili(float(extent.z) / 16.0) * 16)
+	var models := scene_models()   # 顺手把 _scene_palette 读出来
+	if wheel_body_model >= models.size():
+		_warn(
+			"wheel_body_model = %d，但 %s 里只有 %d 个子模型（0 起）"
+			% [wheel_body_model, model_path.get_file(), models.size()]
 		)
-	var result := VoxFile.load_vox(wheel_body, size)
+		return null
+	var model: Dictionary = models[wheel_body_model]
+	var result := VoxFile.volume_of_model(model, voxels_to_cube_size(model["size"]), _scene_palette)
 	_sub_volume = result.get("volume")
 	_sub_mtime = mtime
-	_bounds_ready = false  # 子模型换了，碰撞箱要重算
+	_bounds_ready = false
 	_collision_ready = false
 	for warning in result.get("warnings", []):
-		_warn("子模型（%s）：%s" % [wheel_body.get_file(), str(warning)])
+		_warn(
+			"轮体（%s 的第 %d 个子模型）：%s"
+			% [model_path.get_file(), wheel_body_model, str(warning)]
+		)
 	return _sub_volume
 
 
-## 子模型的原点在零件本地空间的位置（单位 = cube）。
+## 体素里的实心范围 -> 体积尺寸（每轴向上取整到整 cube，至少 1 cube）。
+static func voxels_to_cube_size(extent: Vector3i) -> Vector3i:
+	return Vector3i(
+		maxi(16, ceili(float(extent.x) / 16.0) * 16),
+		maxi(16, ceili(float(extent.y) / 16.0) * 16),
+		maxi(16, ceili(float(extent.z) / 16.0) * 16)
+	)
+
+
+## 轮体挂在零件本地空间的哪里（单位 = cube）。
+##
+## 规则：**画布里怎么摆就怎么摆**。轮体相对轮轴的位移 = 两个子模型在这份 .vox 里的原点之差
+## （作者的画布位置就是装配位置 —— 和武器零件一个道理，不用手写偏移）。
+## 再叠加两样：
+##   * `model_offset`：主轴自己的整体偏移（比如轮轴整体下移 3 像素），两个子模型一起跟着动；
+##   * `wheel_offset`：可选微调，默认 0。
 func sub_model_offset() -> Vector3:
-	return Vector3(wheel_offset) / float(VoxVolume.VOXELS_PER_CUBE)
+	return Vector3(sub_model_offset_voxels()) / float(VoxVolume.VOXELS_PER_CUBE)
+
+
+## 同一件事，单位 = 体素（整数）。
+## 凡是"要拿体素坐标去摆轮体"的地方（图标绘制、工具脚本）都用这个，
+## 别自己拼 `wheel_offset` —— 位置规则变过一次（现在还要加上画布位移和 model_offset）。
+func sub_model_offset_voxels() -> Vector3i:
+	return wheel_offset + wheel_body_scene_shift() + model_offset
+
+
+## 轮体相对轮轴在 .vox 场景里的位移（单位 = 体素）。
+## 轮体没写、模型读不出来、序号越界时返回 0（不崩，回调方自己去报警告）。
+func wheel_body_scene_shift() -> Vector3i:
+	if wheel_body_model < 0:
+		return Vector3i.ZERO
+	var models := scene_models()
+	if models.size() <= wheel_body_model:
+		return Vector3i.ZERO
+	var base: Vector3i = models[0].get("offset", Vector3i.ZERO)
+	var body: Vector3i = models[wheel_body_model].get("offset", Vector3i.ZERO)
+	return body - base
 
 
 ## ── 武器（转塔）：把 .vox 场景里的多个子模型按作者画的位置分别取出来 ──────────
@@ -321,6 +461,7 @@ func scene_models() -> Array:
 		_scene_palette = result.get("palette", [])
 		_scene_mtime = mtime
 		_weapon_volumes.clear()   # 模型换了：各子模型的体积缓存一起作废
+		_weapon_geom_ready = false   # 转塔几何也是从模型推的，一起作废
 	return _scene_models
 
 
@@ -382,9 +523,18 @@ func _scene_volume(models: Array) -> VoxVolume:
 
 
 ## ── 转塔几何：转轴/转点/枪口全部从模型推导 ─────────────────────────────────
+##
+## ⚠️ 这三个值**只跟模型有关**，所以按部件缓存（`_ensure_weapon_geometry()`）——
+## 不能每装一台转塔就重算：一趟要问十几次"最外层是哪一层"，模型在 48³ 体积里
+## 又只占中间一小块，实测 **0.6 秒/把枪**；车上枪一多，进场就是十几秒白等。
 
 ## 竖直回转轴在零件本地水平面上的位置（单位 = cube）：底座（0 号子模型）包围盒的中心。
 func weapon_yaw_center() -> Vector2:
+	_ensure_weapon_geometry()
+	return _yaw_center
+
+
+func _compute_weapon_yaw_center() -> Vector2:
 	var base := weapon_volume(0)
 	if base == null:
 		return Vector2.ZERO
@@ -404,6 +554,11 @@ func weapon_yaw_center() -> Vector2:
 ## 枪管下面还挂着机匣/护木，包围盒中心比真正的枪轴低（这一版模型低 1.5 体素）——
 ## 拿包围盒中心当转点，枪口转起来会画圈。
 func weapon_barrel_axis() -> Dictionary:
+	_ensure_weapon_geometry()
+	return _barrel_axis
+
+
+func _compute_weapon_barrel_axis() -> Dictionary:
 	var volume := weapon_volume(weapon_pitch_model)
 	if volume == null:
 		return {}
@@ -475,7 +630,12 @@ func weapon_muzzle() -> Vector3:
 ## 于是枪管是绕自己的轴线转的，枪口不会画圈（这是用户要的硬性要求）。
 ## 返回 {ok, pivot, reason}；两条轴不相交（枪管没对准回转轴）时 ok = false 并说明原因。
 func weapon_pivot() -> Dictionary:
-	var axis_info := weapon_barrel_axis()
+	_ensure_weapon_geometry()
+	return _pivot_info
+
+
+func _compute_weapon_pivot() -> Dictionary:
+	var axis_info := _barrel_axis
 	if axis_info.is_empty():
 		return {
 			"ok": false,
@@ -485,7 +645,7 @@ func weapon_pivot() -> Dictionary:
 	var axis: int = axis_info["axis"]
 	if axis == 1:
 		return {"ok": false, "pivot": Vector3.ZERO, "reason": "枪管是竖直的，和竖直回转轴平行"}
-	var yaw := weapon_yaw_center()
+	var yaw := _yaw_center
 	var lateral: float = axis_info["lateral"]
 	# 枪管沿 z 时，它的横向位置是 x；沿 x 时是 z。回转轴的对应坐标必须和它重合。
 	var lateral_ok := absf(lateral - (yaw.x if axis == 2 else yaw.y)) < 0.07  # 1 体素
@@ -503,6 +663,20 @@ func weapon_pivot() -> Dictionary:
 	}
 
 
+## 把转塔几何算出来并缓存（模型换了由 `scene_models()` 负责失效）。
+##
+## ⚠️ `_weapon_geom_ready` 必须**最后**才置真：下面第一次取体积时会触发 `scene_models()`
+## 真正去读模型，而那里会把标志清掉。先置真的话，第一次调用结束又变回"没算过"，
+## 缓存等于没生效（每装一台转塔还是重算一遍）。
+func _ensure_weapon_geometry() -> void:
+	if _weapon_geom_ready:
+		return
+	_yaw_center = _compute_weapon_yaw_center()
+	_barrel_axis = _compute_weapon_barrel_axis()
+	_pivot_info = _compute_weapon_pivot()
+	_weapon_geom_ready = true
+
+
 ## 零件的**基准格**（本地格子，绑在模型几何上）：本体 AABB 中心所在那一格。
 ## 压在格线上时取**下面**那一格（轮轴本体正好 2 格厚、中心正好落在格线上，
 ## 取下面那格才是"最靠 -x 的那半块"）。摆放数学（BuildGrid）和镜像都用它。
@@ -516,9 +690,96 @@ static func _cell_below(value: float) -> int:
 	return ceili(value) - 1
 
 
+## 这个零件"看起来的颜色"（**体素平均色**）：被摧毁时炸出的碎片用它 —— 颜色直接来自零件本身。
+## 第一次调用时会遍历一次体素（按 2 步长采样），之后缓存；模型读不出来就退回 `body_color`。
+func debris_colour() -> Color:
+	if _debris_colour_cached:
+		return _debris_colour
+	_debris_colour_cached = true
+	var volume := sub_model_volume()
+	if volume == null:
+		volume = model_volume()
+	if volume == null:
+		_debris_colour = body_color
+		return _debris_colour
+	var lo := volume.solid_lo()
+	var hi := volume.solid_hi()
+	var total := Color(0.0, 0.0, 0.0, 0.0)
+	var samples := 0
+	var step := 2
+	var z := lo.z
+	while z <= hi.z:
+		var y := lo.y
+		while y <= hi.y:
+			var x := lo.x
+			while x <= hi.x:
+				var value := volume.get_voxel(x, y, z)
+				if value > 0:
+					total += volume.color_of(value)
+					samples += 1
+				x += step
+			y += step
+		z += step
+	if samples <= 0:
+		_debris_colour = body_color
+	else:
+		_debris_colour = Color(
+			total.r / float(samples), total.g / float(samples), total.b / float(samples), 1.0
+		)
+	return _debris_colour
+
+
+## 这个零件用到的**所有体素颜色**（去重、最多 12 个，缓存）：碎片每块从里面随机挑一个，
+## 所以多色的零件炸出来是**混色**的，单色零件就是它自己的颜色（颜色直接来自零件本身）。
+func debris_palette() -> PackedColorArray:
+	if _debris_palette_cached:
+		return _debris_palette
+	_debris_palette_cached = true
+	_debris_palette = PackedColorArray()
+	var volume := sub_model_volume()
+	if volume == null:
+		volume = model_volume()
+	if volume == null:
+		_debris_palette.append(body_color)
+		return _debris_palette
+	var lo := volume.solid_lo()
+	var hi := volume.solid_hi()
+	var step := 2
+	var z := lo.z
+	while z <= hi.z:
+		var y := lo.y
+		while y <= hi.y:
+			var x := lo.x
+			while x <= hi.x:
+				var value := volume.get_voxel(x, y, z)
+				if value > 0:
+					var colour := volume.color_of(value)
+					colour.a = 1.0
+					if not _debris_palette.has(colour):
+						_debris_palette.append(colour)
+						if _debris_palette.size() >= 12:
+							return _debris_palette
+				x += step
+			y += step
+		z += step
+	if _debris_palette.is_empty():
+		_debris_palette.append(body_color)
+	return _debris_palette
+
+
 ## 子弹初速度：部件文件写的是真实 m/s，模拟内部用"格/秒"（×1/CUBE_METERS）。
 func muzzle_speed_cubes() -> float:
 	return weapon_muzzle_speed / CUBE_METERS
+
+
+## 射线类武器？(`weapon_projectile = ray`：瞬间命中，没有弹速 / 下坠 / 寿命)
+func is_ray_weapon() -> bool:
+	return weapon_projectile == "ray"
+
+
+## 射线类武器的最大射程（格）：部件文件写的是米。
+func ray_range_cubes() -> float:
+	return maxf(0.0, weapon_ray_range) / CUBE_METERS
 
 
 ## 车轮限速：同上（部件文件写真实 m/s），内部用"格/秒"。
@@ -985,6 +1246,19 @@ func _apply(key: String, value: String, line_no: int) -> void:
 				order = nums[0]
 			else:
 				_warn("第 %d 行：order 需要一个整数" % line_no)
+		"category":
+			# 中文（结构/行驶/武器/辅助/特殊）或英文键都认；界面上显示的是中文
+			var page := value.strip_edges().to_lower()
+			if CATEGORY_ALIASES.has(page):
+				category = CATEGORY_ALIASES[page]
+			else:
+				var choices := []
+				for name in CATEGORIES:
+					choices.append(CATEGORY_LABELS[name])
+				_warn(
+					"第 %d 行：未知分类 '%s'；可选 %s（不写 = 结构）"
+					% [line_no, value, " / ".join(choices)]
+				)
 		"weight":
 			var nums := _parse_floats(value)
 			if nums.size() == 1 and nums[0] >= 0.0:
@@ -1005,6 +1279,8 @@ func _apply(key: String, value: String, line_no: int) -> void:
 				_warn("第 %d 行：pp 需要一个非负整数" % line_no)
 		"core":
 			is_core = value.strip_edges().to_lower() in ["true", "yes", "1", "on"]
+		"weapon_swivel_collider":
+			weapon_swivel_collider = value.strip_edges().to_lower() in ["true", "yes", "1", "on"]
 		"center":
 			var nums := _parse_ints(value)
 			if nums.size() == 3:
@@ -1107,12 +1383,14 @@ func _apply(key: String, value: String, line_no: int) -> void:
 			var nums := _parse_ints(value)
 			if nums.size() == 1 and nums[0] >= 0:
 				weapon_yaw_model = nums[0]
+				_weapon_geom_ready = false
 			else:
 				_warn("第 %d 行：weapon_yaw_model 需要 >= 0 的整数（子模型序号，0 = 底座）" % line_no)
 		"weapon_pitch_model":
 			var nums := _parse_ints(value)
 			if nums.size() == 1 and nums[0] >= 0:
 				weapon_pitch_model = nums[0]
+				_weapon_geom_ready = false
 			else:
 				_warn("第 %d 行：weapon_pitch_model 需要 >= 0 的整数（子模型序号）" % line_no)
 		"weapon_yaw_limit":
@@ -1130,10 +1408,14 @@ func _apply(key: String, value: String, line_no: int) -> void:
 			)
 		"weapon_projectile":
 			var kind := value.strip_edges().to_lower()
-			if kind in ["bullet", "none", ""]:
-				weapon_projectile = "bullet" if kind != "" else "none"
+			if kind in ["bullet", "ray", "none", ""]:
+				weapon_projectile = kind if kind != "" else "none"
 			else:
-				_warn("第 %d 行：weapon_projectile 目前只认 bullet，收到 '%s'" % [line_no, value])
+				_warn("第 %d 行：weapon_projectile 只认 bullet / ray，收到 '%s'" % [line_no, value])
+		"weapon_ray_range":
+			weapon_ray_range = clampf(
+				_parse_float(value, weapon_ray_range, line_no, key, 1.0), 1.0, 5000.0
+			)
 		"weapon_muzzle_speed":
 			weapon_muzzle_speed = _parse_float(value, weapon_muzzle_speed, line_no, key, 0.0)
 		"weapon_damage":
@@ -1141,6 +1423,9 @@ func _apply(key: String, value: String, line_no: int) -> void:
 		"weapon_rpm":
 			# 0 = 不能开火（当成没装武器）；否则射速
 			weapon_rpm = _parse_float(value, weapon_rpm, line_no, key, 0.0)
+		"weapon_pitch":
+			# 枪声音高倍率：允许 < 1（更低沉），夹在 [0.25, 4]
+			weapon_pitch = clampf(_parse_float(value, weapon_pitch, line_no, key, 0.25), 0.25, 4.0)
 		"weapon_spread":
 			weapon_spread = clampf(
 				_parse_float(value, weapon_spread, line_no, key, 0.0), 0.0, 90.0
@@ -1156,6 +1441,28 @@ func _apply(key: String, value: String, line_no: int) -> void:
 			weapon_projectile_life = clampf(
 				_parse_float(value, weapon_projectile_life, line_no, key, 0.0), 0.05, 120.0
 			)
+		"weapon_recoil_impulse":
+			weapon_recoil_impulse = _parse_float(
+				value, weapon_recoil_impulse, line_no, key, 0.0
+			)
+		"weapon_impact_impulse":
+			weapon_impact_impulse = _parse_float(
+				value, weapon_impact_impulse, line_no, key, 0.0
+			)
+		"weapon_bullet_color":
+			var colour_text := value.strip_edges().lstrip("#")
+			if Color.html_is_valid(colour_text):
+				weapon_bullet_color = Color.html(colour_text)
+			else:
+				_warn(
+					"第 %d 行：weapon_bullet_color 要十六进制颜色（如 ffd959），收到 '%s'，已用默认色"
+					% [line_no, value]
+				)
+		"weapon_damage_falloff":
+			# 每 100 米损失的比例：夹在 0~1（1 = 百米外完全没伤害）
+			weapon_damage_falloff = clampf(
+				_parse_float(value, weapon_damage_falloff, line_no, key, 0.0), 0.0, 1.0
+			)
 		"energy_max":
 			energy_max = _parse_float(value, energy_max, line_no, key, 0.0)
 		"energy_regen":
@@ -1170,7 +1477,21 @@ func _apply(key: String, value: String, line_no: int) -> void:
 			else:
 				connection_override = _parse_dirs(value, line_no)
 		"wheel_body":
-			wheel_body = value
+			# 老写法（轮体放在另一个 .vox 里）已弃用：一个零件只对应一个建模文件。
+			_warn(
+				"第 %d 行：wheel_body（轮体放在另一个文件里）已弃用 —— "
+				% line_no
+				+ "把轮体画进 model 那个 .vox 的另一个物体里，再写 wheel_body_model = <序号>"
+			)
+		"wheel_body_model":
+			var nums := _parse_ints(value)
+			if nums.size() == 1 and nums[0] >= 0:
+				wheel_body_model = nums[0]
+			else:
+				_warn(
+					"第 %d 行：wheel_body_model 需要 >= 0 的整数（同一个 .vox 里的子模型序号，0 起）"
+					% line_no
+				)
 		"wheel_offset":
 			var nums := _parse_ints(value)
 			if nums.size() == 3:

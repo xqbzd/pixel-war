@@ -1,4 +1,4 @@
-# 部件建模闭环（v1）
+﻿# 部件建模闭环（v1）
 
 目标：让「AI 生成 + 人精修」的部件建模有一个可跑、可验证的闭环，而不是先攒一堆工具。
 
@@ -30,6 +30,7 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
 | 键 | 说明 |
 | --- | --- |
 | `name` | 显示名 |
+| `category` | 零件菜单里的分页：`结构` / `行驶` / `武器` / `辅助` / `特殊`（英文键 `structure` / `mobility` / `weapon` / `utility` / `special` 也认）。不写 = 结构 |
 | `shape` | `cube` / `half_prism_xz` / `half_prism_xy` / `half_prism_yz` |
 | `cubes` | 部件占地，单位 = cube（每个 cube = 16^3 体素）。`1 1 1` = 单 cube |
 | `render` | `texture`（六面贴图）或 `voxel`（体素网格） |
@@ -39,6 +40,47 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
 
 约束：`texture` 路线要求每个占用的 cube 都是实心 16^3，否则自动退回 `voxel` 并记一条警告
 （`tests/test_vox_core.gd` 里有断言）。`half_prism_*` 的 `cubes` 截面必须是正方形。
+
+### 约定：一个零件 = 一个建模文件（2026-10-15 起）
+
+**除非特别说明，一个零件只对应一个 `.vox`。** 需要多个部件（轮子的轮轴 + 轮体、机枪的
+底座 + 支架 + 枪管）就画在**同一个 .vox 场景的不同物体**里，部件文件里用**子模型序号**引用：
+
+| 键 | 用途 | 例 |
+| --- | --- | --- |
+| `wheel_body_model = <序号>` | 轮子的轮体（轮胎）是第几个子模型，**0 号永远是轮轴本体** | 玩具轮胎 `1`、小货车轮胎 `1` |
+| `weapon_yaw_model` / `weapon_pitch_model` | 转塔的支架 / 枪管是第几个子模型 | 两种机枪都是 `1` / `2` |
+
+* 判断"是不是轮子"一律问 `PartDef.is_wheel()`（= 写了 `wheel_body_model`），别去翻模型路径。
+* 老写法 `wheel_body = <另一个 .vox 的路径>`（轮轴、轮体各一个文件）**已弃用**：写了会留一条
+  指路的警告，但不再生效。要恢复它得先改 `PartDef.sub_model_volume()`。
+* 好处是**位置由画布决定**：两个物体在 MagicaVoxel 里怎么摆，进游戏就怎么装配
+  （和武器的底座/支架/枪管一个道理），不用手写偏移。
+
+轮子的位置换算（`PartDef.sub_model_offset()`，单位 = cube）：
+
+```
+轮体本地原点 = 画布里 (轮体原点 − 轮轴原点) + model_offset + wheel_offset
+```
+
+* 前两项是"照抄画布"：轮轴自己会被 `model_offset` 整体挪（比如玩具轮胎下移 3 象素），
+  轮体跟着一起挪，所以两个子模型永远是一套装配体；
+* `wheel_offset` 只是**微调**（默认 0）：画布位置不合适、又不想动模型时才写。
+* 轮体**绕自己的几何中心转**（`local_centre` 来自 `tight_bounds`），所以轮心要落在轮轴轴线上
+  才不会"绕着轮轴画圈"。写模型时把两个物体的中心对齐即可：
+  玩具轮胎的轮心比轮轴中心低 6.5 体素（作者的选择），小货车轮胎两个中心完全重合。
+
+断言：`tests/test_part_categories.gd` 的两条轮子测试（含"不写 `wheel_offset` 也对"的回归）
+和 `tests/test_model_import.gd` 的 `test_wheel_body_is_a_sub_model_with_collision`。
+
+### 同源武器：单连装 / 双联装
+
+双联装机枪（`data/parts/lightmachinegunx2/light_mg_x2.part.txt`）**不新增任何代码**：
+它的 `.vox` 里三个物体和单连装一一对应（底座 / 支架 / 双枪管，序号和包围盒都对齐），
+所以 `weapon_*` 的字段照抄，转轴 / 转点 / 枪口由模型推导出来也逐个相同，只有数值不同
+（射速 ×1.5、每发伤害略降、更重更费电、炮塔转得更慢）。
+断言：`tests/test_weapon.gd` 的 `test_twin_mg_reuses_the_single_turret_geometry`
+—— 它同时钉住"两把枪的推导结果一致"，防止以后换模型时对不上。
 
 ## 形状与「棱」的规则
 
@@ -191,6 +233,63 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
 
 ## 建造模式（scenes/build_mode.tscn）
 
+### 零件选择：10 格物品栏 + `Tab` 零件菜单
+
+零件会越来越多（目标：上百种），所以**物品栏不再等于"全部零件"**，而是玩家自己配的 10 格：
+
+| 交互 | 行为 |
+| --- | --- |
+| `1`..`9` / `0` | 选第 1..10 格（第 10 格挂在 `0` 上，和键盘那排一致） |
+| `Tab` | 呼出 / 收起零件菜单（悬浮在屏幕中间；开着时鼠标解锁，关掉自动锁回去） |
+| 菜单左侧 5 个按钮 | 结构 / 行驶 / 武器 / 辅助 / 特殊 —— 分页来自部件文件的 `category` |
+| 菜单右区 | 这一类的零件，**正方形斜向视图 + 名字**，多了能滚 |
+| 拖 菜单 → 某格 | 放进那一格（原来那格被替换） |
+| 拖 某格 → 另一格 | 两格**互换位置**（不是插入） |
+| 拖 某格 → 菜单区域 | **清空**那一格（空 = 建造枪手上没东西，左键会提示"这一格是空的"） |
+| 左键点菜单里的零件 | 放进**当前选中格**（懒得拖的时候用） |
+| 中键点场上的零件 | 见下面那条规则 |
+
+中键拾取（用户定的三条，顺序不能变）：
+
+1. 物品栏里**已经有**这个零件 → 跳到那一格；
+2. 没有、但**有空格** → 放进第一个空格并跳过去；
+3. 没有、且**全满** → 替换**当前选中**那一格。
+
+分工（改这块时别把三层搅在一起）：
+
+* `voxel/part_loadout.gd` —— 10 格 + 上面那三条规则，**纯逻辑、不碰 UI**，被
+  `tests/test_part_loadout.gd` 逐条守着（中键的三条分支都在里面）；
+* `scripts/part_picker.gd` —— 只负责画（物品栏 / 菜单 / 拖拽预览）和把鼠标事件翻译成
+  `PartLoadout` 的调用，对外只发 `slot_selected` / `slot_changed` / `menu_toggled` / `notify`；
+* `scripts/build_mode.gd` —— 接信号：重刷手上的模型、虚影、HUD；它不再自己数零件。
+
+**拖拽是自己实现的**，没用引擎的 `_get_drag_data` / `_can_drop_data`：引擎那套只认
+"鼠标底下那个控件肯不肯接"，而"拖回菜单区域就清空"要求整块菜单（含遮罩）都算落点，
+用它反而要到处贴 `_can_drop_data`。自己实现只有三个判断：落在哪个格子 / 落在菜单区域 /
+都不在（= 取消）。按下后移动不到 6 px 当点击处理（点格子选格、点菜单项放零件）。
+
+### 零件图标（斜向视图）
+
+`voxel/part_icon.gd` 用**纯 CPU** 把体素体积画成 2:1 的斜向视图（顶面菱形 + 前面 + 右面，
+三档明暗 `1.0 / 0.8 / 0.6`），本体和轮体的体素都算进去。
+
+* 不每个零件开一个 `SubViewport`：上百个零件就是上百个渲染目标，而且每个都要等一帧才能截图；
+* 按需生成 + 缓存：`PartLibrary.icon(id)` 第一次用到才画，之后返回同一张 `ImageTexture`
+  —— 菜单只建**当前分类页**的零件项，没打开过的分类一个像素都不画；
+* 投影尺寸随零件大小走（`65x65` / `139x123` …），最后**等比**缩进 64x64 的方格：
+  图标之间的大小关系要能比（玩具轮胎就该比小货车轮胎小一圈）；
+* 画出来的几何 = 同一份体素数据，所以图标不可能和实物跑偏。
+
+要看图标长什么样（无头也行，会把形状打成字符画并导出 PNG）：
+
+```
+godot --headless --path . --script res://tools/probe_icons.gd
+```
+
+断言：`tests/test_part_icons.gd`（正方形 / 透明四角 / 三档明暗 / 轮体算进去 / 缓存）
+和 `tests/test_part_picker.gd`（10 格、分类页、点击落位）。分类本身的数据守门在
+`tests/test_part_categories.gd`。
+
 ### 外部建模工具接入（推荐路线）
 
 **不要用 AI 手写形状** —— 用现成的体素工具建模，游戏这边只做导入：
@@ -206,7 +305,8 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
    - 连接面自动推导并标出来：绿色 = 可连接面，黄色 = 默认连接面（最朝下的那个）；
    - `1..9` 选模型、`R` 暂停自转、`G` 在 `data/parts/` 生成/更新对应的 `.part.txt`、
      `E` 另存一份体素文本到 `exports/`；
-5. 生成出来的部件立刻出现在建造模式的物品栏里（按 `order` 字段排序）。
+5. 生成出来的部件立刻出现在建造模式的零件菜单里（按 `order` 字段排；`Tab` 打开菜单，
+   分类那一页由部件文件里的 `category` 决定）。
 
 部件文件里新增两个键：
 
@@ -223,9 +323,10 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
 地板是同一块 64 x 64 格线地板，正前方有琥珀色方向箭头。
 
 操作：`WASD` 平移、`空格` 升、`Shift` 降、鼠标转向、`滚轮 / R` 旋转部件、
-`1 / 2 / 3` 切换部件（类似 MC 物品栏，底部有高亮槽位）、`左键` 建造、`右键` 拆除、
-`中键` 点零件 = 把当前建造部件切换成它、`M` 开关镜像建造（`【` / `】` 挪对称面）、
-`ESC` 解锁鼠标（再按一次回主界面）。
+`Tab` 打开零件菜单、`1`..`0` 选物品栏（底部 10 格高亮）、`左键` 建造、`右键` 拆除、
+`中键` 点零件 = 收进物品栏（规则见上面「零件选择」一节）、
+`M` 开关镜像建造（`【` / `】` 挪对称面）、
+`ESC` 打开菜单（继续建造 / 游戏设置 / 保存 / 去测试场 / 退出）。
 
 整辆载具的平移（不改变形状，只挪位置）：
 
@@ -281,9 +382,13 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
   断言：`test_anchor_mirrors_to_the_mirrored_part`（6 个零件 × 24 个旋转 × 3 个半格档位）/
   `test_mirror_delete_pairs_by_mirrored_anchor_cell`。
   镜像位置没有对应零件时只拆本体（`test_mirror_delete_removes_only_the_body_when_unpaired`）。
-* 真正**手性**的零件（24 个轴对齐旋转都还原不出镜像，得另做一份左手系模型）才会被拒绝：
-  镜像模式不给候选，HUD 写出原因。断言 `test_mirror_refuses_chiral_parts`
-  （用测试里现造的手性块当样张，库里目前没有这种零件）。
+* ⚠️ **镜像性由人判断，代码不自动否决零件**（2026-10-15 用户要求）：任何零件都能镜像，
+  找不到严格对折时按单位阵处理（"放得下就放"，但镜像不是逐体素的真镜像）。
+  `mirror_fold_rotation()` 现在只做两件事：给两个角块找那个非单位阵的对折旋转、
+  把"对不上几个格子"报在 `mismatch` 里。将来真加非对称零件 → 用户会单独说明，
+  那时再按说明处理（另做左手系副本 / 在部件文件里声明），而不是让代码去猜。
+  断言：`test_mirror_does_not_auto_refuse_asymmetric_parts`（拿测试里现造的手性块当样张）
+  和 `test_mirrored_placement_equals_true_reflection_voxel_by_voxel`（库里 9 个零件严格 0 对不上）。
 * 镜面在场地里画成一片半透明竖直面 + 地板上一条青线（只在镜像模式开着时显示）；
   镜像体的虚影偏青，和本体的白虚影一眼分得开。
 
@@ -377,7 +482,8 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
 * **反平行贴合绕世界 UP 转 180°**（而不是绕 `from × UP`）：后者会把零件顺带上下颠倒，
   带 `model_offset` 的零件在机身左右两侧就对不上了（一边下探 3 像素、一边上翻 3 像素）。
   竖直方向的反平行（挂顶棚）绕 X 轴转，只能倒过来，这是没法避免的。
-* **附属子模型（轮体）**：`wheel_body` + `wheel_offset`（单位 = 体素，相对零件本地原点）。
+* **附属子模型（轮体）**：`wheel_body_model`（轮体 = 同一个 .vox 里的第几个物体）
+  + 可选的 `wheel_offset` 微调；位置默认由画布里的相对位置决定（见上面「一个零件 = 一个建模文件」）。
   它不是独立部件 —— 跟着所属零件走，**而且算碰撞体积**：
   - `sub_model_volume()` 按 .vox 自己的范围向上取整到 cube 读进来（保证两块体积落在同一个
     1/16 栅格上，逐体素比才准）；
@@ -462,7 +568,7 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
   每个零件一个 `BoxShape3D`（用**本体**包围盒，轮胎不算），质量 = 部件 `weight` 之和，
   质心 = 各零件重心按重量加权 —— 只在进场时算一次，不是每帧。
 * **轮子 = 自定义"整圈 16 射线"轮胎**（`_add_wheel()` / `_apply_wheel()`，2026-10-12 换上）：
-  带 `wheel_body` 的部件（轮轴）→ 一个普通 `Node3D`（放在轮胎几何中心，半径取轮胎盒子 y/z
+  `is_wheel()` 的部件（轮轴）→ 一个普通 `Node3D`（放在轮胎几何中心，半径取轮胎盒子 y/z
   较大者一半），轮胎网格挂它下面；物理全在 `scripts/test_field.gd` 里自己算。
   - **为什么换**：原生 `VehicleWheel3D` 每个轮子只有**一条竖直射线且不可配**，轮子骑上台阶、
     路缘、坡脚时"感觉不到"，越野很差。（早年试过"一簇 VehicleWheel3D"和"视觉去穿透"，都不划算、
@@ -527,7 +633,7 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
     | 全油门满舵连转 4 秒 | 翻车 | 最大 36° → 稳 |
   - 0.6 格高的台坎（= 轮半径的 60%）**要有一段助跑**才过得去（陡坎慢慢蹭会滑回来 —— 这一档
     本来就不是慢速能上的高度）。
-  - 手感旋钮（都在 `data/parts/wheel2x2/wheel_axle_2x2.part.txt`，调参顺序建议照这个来）：
+  - 手感旋钮（都在 `data/parts/toywheel2x2/toy_wheel_2x2.part.txt`，调参顺序建议照这个来）：
     `wheel_mu`（抓地力，**最要紧的一个**，1.8 左右开始明显"粘地"）→
     `wheel_suspension_travel`（行程）/ `wheel_support_multiple`（触底倍率，默认 8；阻尼自动计算）→
     `wheel_anti_roll_tilt`（防翻力度，★**单位是度**，写 0 = 关掉防翻）/ `wheel_anti_roll_damping` →
@@ -545,7 +651,7 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
   - 顺带记住两个量测教训：① 判"轮胎穿模"**不能**用世界轴对齐包围盒（轮胎被 yaw 过时盒子会
     虚胖：3.5 宽的轮胎能量出 2.77 高），要用"从轮心朝圆周打射线，看有没有比半径更近的面"；
     ② 用"在一段平地上放块板子/台阶"做夹具时，台阶高度要按**轮子底面**（轮心−半径）算。
-* **驾驶**：W/S 油门·反向、A/D 转向、空格**不参与**驾驶（另有他用），环视相机，ESC 回主界面。
+* **驾驶**：W/S 油门·反向、A/D 转向、空格**不参与**驾驶（另有他用），环视相机，ESC 暂停菜单。
   **O = 显示/隐藏重心**（**建造模式和测试场都有**）：标记 = 重心亮球 + 一条垂到地面的线 +
   地面上的十字；HUD 上同时给出「重心本地坐标 · 离地高度 · 整车质量」。
   调驾驶手感时最该看的就是"重心多高、在前后轴之间偏哪儿"。
@@ -564,6 +670,12 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
   （轮胎中心 x > 重心 x → +1，否则 -1），`use_as_steering = true` 全开。所以打方向时
   **重心前的轮子正转、重心后的轮子反转**——一侧轮子被打掉后，剩下的轮子照样能把车拧过来。
   断言：`test_wheel_specs`（含"重心被压到车头一侧"的极端情形）。
+* **转向行程按轮轴位置分配**（`VehicleDef.steer_travel_factor()`，2026-10-18 用户要求）：
+  只有**最前 / 最后**的轮轴拿满行程，偏中间的轮子按"离前后中点有多远"线性缩小
+  （正中间 = 0，不转向）。以前中间轮也全额转向，多轮车转弯像在横着搓。
+  实现在 `wheel_specs()` 里给每个轮轴加 `steer_factor`，`TestField` 算目标转角时乘上去：
+  `target = steer_sign × steer × steer_max × steer_factor`。断言：
+  `test_steer_travel_factor`（1 / 0.5 / 0 / 无跨度不缩放）+ `test_real_vehicle_wheels_have_steer_factor`。
   **转角不是瞬移**：每帧用 `move_toward` 朝目标角靠拢，角速度上限 = 部件文件里的
   `wheel_steer_speed`（度/秒，默认 90，被夹到 ≥1）。松方向键时目标回 0，同样按这个速度
   往回走 —— 打方向有"缓启动"，不会一帧打满、一帧回正。实测（120Hz）：90°/s 时每帧
@@ -605,7 +717,7 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
   `_add_wheel()` 建节点时读一次（每帧只抄下来的数值，不查表）；解析失败保留默认值并告警，
   不会出现"参数写歪 → 车不动"。断言：`test_wheel_parameters_live_in_the_part_file` /
   `test_wheel_tuning_keys_are_parsed_and_guarded`。**实际能调的键名以
-  `wheel_axle_2x2.part.txt` 里带注释的那一份为准**（那份是给用户看的清单）。
+  `toy_wheel_2x2.part.txt` 里带注释的那一份为准**（那份是给用户看的清单）。
 * **动力 vs 翘头（调参时看这条）**：车会不会一给油就抬头，只看两个数 ——
   可用加速度 `驱动轮数 × wheel_engine_force / 整车质量`，和翘头门槛
   `g × (重心到后轴的水平距离) / 重心离地高度`。可用的比门槛大就抬前轮（数据层没有防翘头，
@@ -659,6 +771,14 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
     （2 预留给敌人，以后敌人放这层就会被瞄准，不用改代码），自家底盘**按 RID 排除**
     （它和地形同在层 1）。瞄点上有颗红球（`AimMarker`）标出来，HUD 那行「武器 轻机枪：
     瞄点 xx 格（命中/空中）· 水平 xx° · 俯仰 xx°」就是它。
+    * ⚠️ 这条射线要**排除所有车的车体**（整车包围盒）和自己的受击盒：车体是个方盒，
+      顶面比真实外形高（车顶有台阶），不排除的话准星瞄车顶时瞄点会飘在车顶上方几格，
+      子弹全从车顶飞过去（用户 2026-10-19 报的）。排除车体后射线打的是 `hitboxes` 上的真实几何。
+    * ⚠️ 瞄点**就是准星指到的地方**（命中点），不要做任何"吸附到敌人中心"的处理：
+      试过"命中别人车就用活着零件的中心"，结果是"准星只要在对方车上就无脑锁质心"，
+      完全不跟准星走（用户 2026-10-19 否掉了）。残影问题改用**受击盒每帧重建**解决。
+      人机的 `_ai_aim_point()` / 视野判定 / 手动标记 Q 用的是 `VehicleRig.alive_centre_world()`
+      （活着零件的视觉中心，跟着残骸走）。断言：`test_aim_point_follows_destroyed_parts`。
   - **角度**：`Turret.solve_aim()` 是纯函数（测试直接打它）。水平角 = 绕本地 +Y 的**带符号
     夹角**，天然落在 (-180°, 180°] —— 这就是"**走最短路径**"（跨 ±180° 也是 20° 就不绕 340°）；
     俯仰 = 相对水平面的仰角。射界 `weapon_yaw_limit` 是**整角**：360 = 全向不夹，
@@ -824,7 +944,8 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
   - **开火参数**（都在 `light_mg.part.txt`；下面只是"有哪些键、什么单位"，
     **具体数值是用户手调的，以部件文件为准** —— 测试里也特意不写死这些数）：
 
-      weapon_projectile      = bullet  # 射弹类型（目前只有 bullet = 受重力的点状弹丸）
+      weapon_projectile      = bullet  # 射弹类型：bullet（受重力的点状弹丸）/ ray（瞬间命中的射线）
+      weapon_ray_range       = <米>    # 射线类专用：最大射程（没有弹速/下坠/寿命）
       weapon_muzzle_speed    = <m/s>   # 初速度，真实 m/s
       weapon_damage          = <数值>  # 每发伤害
       weapon_rpm             = <rpm>   # 射速 发/分钟
@@ -832,6 +953,41 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
       weapon_traverse_speed  = <度/秒> # 炮塔最高转速（水平俯仰共用）
       weapon_energy_cost     = <能量>  # 每发耗能 ← 用户列表里没有这一项，先加了一个
       weapon_projectile_life = <秒>    # 弹丸寿命（夹在 0.05~120 秒）
+
+    **射线类武器**（2026-10-19 用户要求）：`weapon_projectile = ray` 时**瞬间命中** ——
+    没有弹速 / 下坠 / 寿命，只有 `weapon_ray_range`（最大射程，米）；**扩散和距离衰减照旧**
+    （`weapon_spread` / `weapon_damage_falloff`）。实现：`Projectiles.fire_ray()` 从枪口打一条射线，
+    命中结算和普通子弹**完全一致**（同一个 `hit` 信号 / 命中小爆炸 / 冲击冲量 / 自吃判定），
+    尾迹是一条**半透明灰白色的线柱**（`BEAM_WIDTH = 0.16` 格、`BEAM_LIFE = 0.09` 秒淡出、池化 24 条）。
+    人机的提前量计算遇到射线类会跳过（`BattleMode._ai_aim_point()`）—— 瞬间命中不需要预判。
+    **两把机枪现在都是射线类**；普通子弹类完整保留（`Projectiles.fire()` + `weapon_projectile = bullet`），
+    以后做别的弹种直接用。
+
+    **弹头（普通子弹）的四个参数**（2026-10-18 按用户要求加，默认值 = 加之前的行为，
+    所以老部件文件不写这几行时手感完全不变）：
+
+      weapon_recoil_impulse  = <kg·格/秒>  # 后坐冲量：每发把**自己**沿枪管反方向推一下，
+                                          # 作用点在枪口（偏心安装会带力矩）。0 = 没后坐
+      weapon_impact_impulse  = <kg·格/秒>  # 冲击冲量：命中**刚体**时把对方推一下，
+                                          # 作用点在命中点（所以带一点转动）。0 = 不推
+      weapon_bullet_color    = <RRGGBB>    # 弹头颜色：曳光轨迹 + 弹着点火花都用它，
+                                          # 默认 ffd959（改之前的黄色）；写错退回默认 + 警告
+      weapon_damage_falloff  = <比例/100m> # 距离衰减：每飞 100 米损失多少伤害比例
+                                          # （0.1 = 每百米 -10%；1 = 百米外没伤害），夹在 0~1
+
+    - 冲量单位是 `质量 × 速度`，质量 kg、速度**格/秒**（1 格 = 0.5 米）。一辆 2000 kg 的车
+      写 100 → 每发 0.05 格/秒（0.025 m/s）后退。后坐由测试场施加（`TestField.recoil_impulse_vector()`），
+      冲击冲量由射弹施加（`Projectiles.impact_impulse_vector()`）；两个都是纯函数，测试直接打它们。
+    - 距离衰减在**命中时**结算：`Projectiles.damage_before_impact(伤害, 系数, 已飞格数)`，
+      按真实米数算（`CUBE_METERS`），夹在 0~1（飞过头 = 0 伤害，不会变负数）。
+      所以同一条枪打近处和远处伤害不同，HUD 上的"掉了 N 血"是衰减后的净伤害。
+      实测（真实物理空间里打 50 格外的刚体，系数 0.1、伤害 100）：命中伤害 97.6 = 100×(1-0.1×24m/100m)，
+      靶子被 500 冲量推出 4.9 格/秒（质量 100）。
+    - 颜色是**每发独立**的：曳光弹和火花是池化节点，`fire()` 每发把材质 `albedo_color` 染成
+      弹头颜色（`Projectiles._tint()`），所以同一个池子里可以混着不同枪的颜色。
+    - 断言：`test_bullet_head_parameters_are_parsed`、`test_turret_copies_bullet_head_parameters`、
+      `test_projectile_applies_bullet_colour_and_falloff`、`test_impact_impulse_only_pushes_rigid_bodies`、
+      `test_recoil_impulse_points_backwards`。
 
     **防卡爆的三道闸**：① 每发寿命 `weapon_projectile_life`（射速 × 寿命 = 同屏几发）；
     ② 射弹池硬上限 `Projectiles.MAX_LIVE = 256`（超了丢最老那发）；
@@ -909,7 +1065,7 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
     （默认值 / 读写 / 限位 0..1 / 总线被建出来 / 0% 真的静音）。
   - **设置里的开关：镜头跟随车体转动**（`CheckButton`，`GameSettings.camera_follow()` →
     `user://settings.cfg` 的 `[look] camera_follow_vehicle`，默认开）。
-    **两种模式下鼠标都能自由环视**（`_camera_yaw` / `_camera_pitch` / 滚轮距离都不变），
+    **两种模式下鼠标都能自由环视**（`_camera_yaw` / `_camera_pitch` / 滚轮视野都不变），
     区别只在"鼠标转的是哪种角度"（`TestField.camera_yaw_reference(flat_forward, follow)`）：
     开 = 基准是**车头的水平投影**，`_camera_yaw` 是相对车头的偏移 → 车一转向画面跟着转；
     关 = 基准是**世界 +x**，`_camera_yaw` 就是世界绝对朝向 → 车原地打转画面一动不动，
@@ -939,8 +1095,33 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
   - `.wav` 默认**不循环**：循环是运行时在 `game_audio.gd` 里打开
     （`AudioStreamWAV.loop_mode = LOOP_FORWARD` + 整段循环点），所以换素材不用动 `.import`。
     换完文件记得让编辑器重新导入（`filesystem_manage(op="scan")` 或 reimport）。
-* **相机 = 鼠标自由环视**（不自动回正，瞄准要靠它），滚轮变焦，视线被墙挡住自动贴墙；
+* **相机 = 鼠标自由环视**（不自动回正，瞄准要靠它），视线被墙挡住自动贴墙；
   **不做位置平滑**（相机硬贴在环视位置，转视角没有拖影）。
+  贴墙时**最近也不小于 `CAMERA_MIN_DISTANCE = 8 格`**：太近时 `look_at` 的方向几乎是零向量，
+  相机朝向会瞬间失效 → **画面闪一下别的视角再回来**（2026-10-18 用户报的 bug）；
+  射线还会排除自己车的**受击盒**（它就贴在车身上，不排掉会把镜头拽进车里）。
+  另外 `_unhandled_input()` 会忽略单帧 `relative` 超过 `MOUSE_MAX_DELTA = 220` 像素的鼠标事件 ——
+  切窗口 / 系统把光标拉回中心时会送来这种"离谱跳变"，表现同样是视角突然甩走再回来。
+* **滚轮调的是视野（FOV），不是远近**（用户 2026-10-18 定的）：相机和车之间距离固定
+  （`CAMERA_DISTANCE`），滚轮在 `CAMERA_FOV_MIN~MAX` 之间调腰射视野，每格 ±`CAMERA_FOV_STEP` 度；
+  **右键按住 = 开镜**（InputMap 动作 `aim_scope`），开镜时滚轮调倍率 `SCOPE_ZOOM_MIN~MAX`
+  （默认 2~16 倍，乘法步进 1.25），视野 = 平时视野 ÷ 倍率。倍率存在 `_scope_zoom` 上，
+  **收镜不清零**，下次按下去还是上次那个倍数（单场战斗内记忆）。
+  `_camera.fov` 每帧朝目标推（`CAMERA_FOV_SPEED` 度/秒，0 = 瞬间），所以推近/拉回不会"咔"一下跳。
+* **开镜遮罩 = `scripts/scope_overlay.gd`**（一个 `Control`，全部 `_draw()` 画出来，没有贴图素材）：
+  屏幕中央圆窗 + 窗外压黑（一条"宽度极大"的圆弧环，内边正好落在圆窗上，避免四块矩形的接缝）、
+  黑边亮芯的十字分划（亮芯在暗墙前也看得见）+ 中心红点、右侧**倍率滑条**
+  （对数刻度：×2/×4/×8/×16 等距，滑块跟鼠标滚轮走，当前倍率数字显示在滑块左边）。
+  只在开镜时淡入（`FADE_SPEED`），同时把原来的白色准星收起来；遮罩**先加**进 HUD，
+  所以左上角的调试文字不会被压黑。状态没变时不重画（`queue_redraw()` 只在倍率/淡入变化时调）。
+* **镜头灵敏度跟着视野缩放**（同一批需求）：`TestField.look_sensitivity_scale(视野)` =
+  `tan(视野/2) / tan(默认视野/2)`，鼠标位移乘它之后再转视角。用 tan 而不是 FOV 比例，是因为
+  投影缩放本身就是 1/tan(FOV/2)，这样"一个鼠标计数走过的屏幕像素"在任何倍率下都一致；
+  下限 0.02 防止极端倍率下灵敏度变 0。实测（鼠标 120 单位）：腰射 70° → 15.6°，2 倍（35°）→ 7.0°，
+  7.6 倍（9.2°）→ 1.8°。
+  断言：`test_camera_fov_wheel_and_scope_zoom`、`test_scope_zoom_is_remembered_across_scope_in_and_out`、
+  `test_camera_fov_glides_to_the_target`、`test_look_sensitivity_follows_zoom`、
+  `test_scope_track_is_logarithmic`、`test_scope_overlay_follows_scope_state`。
   ⚠️ **相机取车的变换必须用 `get_global_transform_interpolated()`，不能用 `global_transform`**：
   后者是**物理时刻**的、前者是**渲染时刻**的（插值后）。物理 120Hz、渲染 ~120FPS 时两者能差
   一个整物理步的位移 —— 实测 80 格/秒时差 **0.65 格**（车长的 1/8），而且相位每帧都在变。
@@ -1075,15 +1256,19 @@ data/parts/*.part.txt                  ← AI 和人改的都是这里（纯文�
 
 **转向角"回中"速度**（在轮轴部件文件里，不在 handling.txt）：`wheel_steer_return_speed`
 （度/秒）= 松开方向键后转角回 0° 的速度，**和打方向的 `wheel_steer_speed` 分开**。
-不写 = 跟 `wheel_steer_speed` 同速（老行为）；`wheel_axle_2x2.part.txt` 现在写 240
+不写 = 跟 `wheel_steer_speed` 同速（老行为）；`toy_wheel_2x2.part.txt` 现在写 240
 （打方向仍是 60，所以"缓启动 + 撒手就正"两者兼得）。
 
 ### 已知待办
 
 * 还没有保存载具（`VehicleDef` 的 yaw 吸附与重叠检测已经就位，直接对接即可）。
-* 没有撤销 / 复制粘贴、没有部件分类与成本显示。
-* 镜像建造要支持"镜像 == 某个轴对齐旋转"的零件（库里 6 个都满足，含两个角块）；
-  真手性的零件（镜像必须另做一份左手系模型）现在还只是被拒绝，没有副本机制。
+* 没有撤销 / 复制粘贴；分类有了（`category` + `Tab` 菜单），但零件上还没有成本 / 数值显示
+  （图标下面只有名字）。
+* 物品栏（10 格）是**本次会话内**的：退出建造模式不保存，也没有从载具文件里还原。
+  要持久化的话，`data/vehicles/*.vehicle.txt` 里加一行 `hotbar = <id> <id> ...` 即可。
+* 镜像建造假设"镜像 == 某个轴对齐旋转"（库里的零件都满足，含两个角块）；
+  真手性的零件（镜像必须另做一份左手系模型）现在也能镜像 —— 镜像性由用户判断，
+  代码不否决（见上面「镜像建造」一节）；要支持左手系副本得另加机制。
 * 放置完全不要求连接：零件想怎么悬空都行（建造的中间状态），**代价只是进不了测试场**
   （`robot_status()` 要求"有核心 + 全部连到核心"）。要做"必须连到已有结构"的老规则，
   得在 `can_place()` 里重新加一条要求（`_collect_pairs()` 的返回值就够用）。
@@ -1148,3 +1333,462 @@ Godot 的游戏进程**不会热重载脚本**：改了 `.gd` 之后，正在跑
   镜像开关和对称面位置也在 `_aim_key` 里，所以按 `M` / `【` `】` 会立刻重算。
 
 实测（216 个方块的场地，单次 `plan()`）：卡到跑不完 → 3.06 ms → **0.39 ms**。
+
+
+---
+
+## 人机对战模式（5v5，2026-10-18）
+
+主界面「进入战斗」→ `scenes/battle_mode.tscn` → `scripts/battle_mode.gd`。
+
+**为什么是"继承测试场"而不是另写一套**：轮胎物理、转塔、弹道、毁伤、相机、开镜全在
+`TestField` 里，对战模式只多三样东西（场地 / 队伍 / 人机）。所以 `BattleMode extends TestField`，
+只覆盖这几个钩子（基类里都留好了）：
+
+* `_build_arena()` —— 换成 `BattleArena`（不再载入 Truck Town）；
+* `_player_spawn_transform()` —— 玩家出生在我方这一侧；
+* `_spawn_enemy_replicas()` —— 测试场的"4 台靶子"换成 **4 个人机队友 + 5 个人机敌人**；
+* `_vehicle_input()` —— 玩家读键盘，人机走 AI；
+* `_update_battle()` / `_on_vehicle_eliminated()` —— 胜负判定；
+* `_show_debug_hud()` / `_hud_title()` / `_enemy_word()` —— HUD 去掉测试场那几行调试信息。
+
+基类为此做的泛化（测试场行为不变）：每台车有自己的 `turrets` / `clip_boxes` / `energy` /
+`centre` / `team`，`_spawn_vehicle()` 是"任何一台车进场"的唯一入口。
+
+### 场地（`scripts/battle_arena.gd`）
+
+* **500 m × 500 m**（内部 1000 格，1 格 = 0.5 米），地形网格 50 × 50 格（每格 10 米，
+  5000 个三角形，一个 trimesh 碰撞体）。2026-10-18 用户要求从 1 公里缩到一半。
+* 起伏 = 四层正弦叠加：实测落差 **18.5 米、最陡 6.6°**；生成后还有一道
+  `_clamp_pair()` 把相邻格高差夹到 `tan(20°) × 格距` 以内 —— **20° 是硬上限**（用户要求）。
+* 地面颜色按高度 / 坡度 / 三档色斑刷顶点色，一个 draw call；没有贴图素材。
+* 掩体：Kenney Nature Kit（CC0，项目里已有）的岩石 / 崖壁块，**12 堆共 120 个**（500 米场地实际约 115 个），
+  每堆 55 米半径 —— 地图上有几处像样的交火点，而不是把石头均匀撒满 1 平方公里。
+  每个掩体一个 `StaticBody3D` + BoxShape（按包围盒 88%），和地面同在第 1 层。
+* 装饰：树 130 / 灌木 170，MultiMesh 一批画完，**不参与碰撞**（省物理，也不会让人机撞树）。
+* 出生区 60 米内不放掩体；两队出生在 x = ±110 米（相隔约 220 米），车头相对。
+
+### 队伍 / 友军伤害
+
+碰撞层：1 = 地形，2 = 我方车体，3 = 敌方车体（`AIM_LAYERS` 三层都包含）。
+敌我判定不看层，看 `VehicleRig.team`：`_on_projectile_hit()` 里
+`_team_of_key[owner_key] == rig.team` 就直接返回 —— **队友打队友不掉血**（火花照放）。
+关闭友军伤害的原因：10 台车挤在一起，误伤会让"谁在打谁"完全看不懂；
+人机的瞄准也会被队友挡枪（见下）。
+
+### 人机（`BattleMode._ai_*`）
+
+每物理帧一次，没有寻路（开阔缓坡 + 前方射线 + 卡住倒车就够了）：
+
+1. `_ai_target()`：最近的、还活着的敌人，每 `bot_retarget_seconds` 秒或目标死了才换；
+2. `_ai_aim_point()`：目标重心 + **提前量**（`lead_point()`：速度 × 距离 / 初速）；
+3. `_ai_sees()`：从车顶到目标重心打一条射线（地形/掩体/别的车挡住 = 没看到）；
+4. **反应时间**：看到敌人（视线通）后要等 `bot_reaction_seconds`（默认 **0.3 秒**）才允许开火；
+5. **瞄点随机偏差**：刚看到时瞄点相对核心随机偏最多 `bot_aim_spread_deg`（默认 **2°**），
+   偏移量 = `tan(角度) × 距离 × decay`；连续开火 `bot_aim_settle_seconds`（默认 **2 秒**）内
+   decay 从 1 线性降到 0（越打越准）；**换目标 / 视线断了重新发现 → 偏差和反应计时重置**；
+6. `_ai_can_fire()`：距离 ≤ `bot_fire_range`、某台转塔的枪口与瞄准方向夹角 ≤
+   `bot_aim_tolerance`、从枪口到瞄点的射线**先打到的不是地形、也不是队友**；
+7. 行驶：远了冲（油门 1）、近了倒（油门 -1）、中距离绕圈（`bot_standoff`），
+   转向 `steer_towards()`（+1 = 左，和玩家按 A 一致）；
+8. `_ai_avoid()`：前方 `bot_probe` 格打一条射线，撞到就往空的一侧偏 `bot_avoid_angle`；
+9. 卡住检测：给油但速度 < `bot_stuck_speed` 超过 `bot_stuck_seconds` → 倒车 `bot_reverse_seconds`。
+
+**所有参数都在 `data/battle_ai.txt`**（`键 = 数值`，`#` 注释；改完重新进一次战局就生效）：
+`bot_standoff`（绕圈距离）、`bot_too_close`（倒车距离）、`bot_fire_range`、`bot_aim_tolerance`、
+`bot_retarget_seconds`、`bot_stuck_speed`、`bot_stuck_seconds`、`bot_reverse_seconds`、
+`bot_probe`、`bot_avoid_angle`、`bot_reaction_seconds`、`bot_aim_spread_deg`、
+`bot_aim_settle_seconds`。
+
+人机的车 = `data/vehicles/bot_light.vehicle.txt`（16 件 / 4 轮 / 1 枪）和
+`bot_gunner.vehicle.txt`（17 件 / 2 枪），都是能正常开、有核心的合法整机（由建造网格生成，
+`robot_status()` 通过）。**要调人机强度就改这两个文件**（多装一把枪立刻变强）。
+
+### 进入战斗的配置界面（2026-10-19 新增）
+
+主界面「进入战斗」不再直接开局，改成先开 `scenes/battle_setup.tscn`（`scripts/battle_setup.gd`）：
+
+1. **选模式**：左 = 匹配模式（`disabled`，占位，以后做联机）；右 = 自定义房间；
+2. **自定义房间**：
+   * 中间：游戏模式（只有 `歼灭模式`：一条命 / 不可复活 / 打光对面获胜）+ 地图（只有 `平原草地`），
+     列表在 `GAME_MODES` / `MAPS` 里，以后加一条就行；
+   * 左右：我方 / 敌方各 **5 个格子**，玩家默认在左队第 1 格，其余空位；
+   * 底部：**添加人机**（`PopupMenu` 列出 `data/vehicles` 下所有存储载具 → 放到选中的格子）、
+     **换位到此**（玩家在自己队内换格子）、**邀请朋友**（disabled 占位）、**开始游戏**。
+3. 点「开始游戏」才把名单塞进 `BattleMode.pending_roster` 并切到对战场景。
+   ⚠️ `change_scene_to_file()` 是**帧末**才生效的：战局要加载 10 台车 + 场地，这一两秒里旧界面
+   还会画在游戏画面上（用户报的"进战斗后 UI 没消失"）。所以点下去**立刻**收起界面、只留一行
+   "正在进入战斗…"（`_show_loading()`）；换场景失败会退回来并提示错误码。
+
+**名单规则**全在 `scripts/battle_roster.gd`（`BattleRoster`，纯函数，`tests/test_battle_roster.gd` 全覆盖）：
+空 = 2×5 空位；`default_roster()` = 玩家在 [0,0]；`set_bot()` 不覆盖玩家；
+`move_player()` 清空原格并把载具 id 带过去；`can_start()` 要求有玩家 + 两队各至少 1 台。
+对战侧：`_spawn_enemy_replicas()` 按名单生成（`empty` 跳过、`player` 交给测试场生成），
+玩家出生点用自己那一格的 Marker（`_player_spawn_transform()`），HUD 的 `我方 x/y` 也按名单里的实际台数显示。
+
+### 规则
+
+一条命，一队全灭就结束（`_team_alive()` 每帧兜底 + 击毁回调里立刻判一次）；
+胜利/失败写在大字横幅 + HUD 上；ESC 暂停菜单。玩家先死也能看队友打完。
+
+### 性能优化（2026-10-19：10 台 293 零件的 "111" 一起跑）
+
+症状：双方 10 台都是 `custom_1`（293 零件 / 10 根轴 / 6 转塔）时，release 也常掉到 30 以下。
+
+**根因是"每个零件一个碰撞盒挂在刚体上"**：10 × 293 = 2930 个盒子和地形 trimesh 做接触查询
+（实测物理 **21 ms/步**、9 FPS；同样 10 台 16 零件的轻车只要 10.8 ms）。逐项改：
+
+1. **车体地形碰撞 = 全部方块贪心合并**（`VehicleRig._add_chassis_hull()`）：
+   * **轮轴 / 核心 / 炮塔底座**这些不动的部件**全部**并进合并盒（用户 2026-10-19 的要求）；
+   * 方块（含半砖/角块 —— **地形碰撞一律按整格算**）按整数格**贪心合并**成矩形盒子
+     （`_greedy_merge()`：先沿 X 拉长、再沿 Z 铺宽、最后沿 Y 叠高），掉零件时限流 0.2 秒重建；
+   * 唯一的例外：部件文件里 **`weapon_swivel_collider = true`** 的炮塔给支架一个独立碰撞盒
+     （体积小的枪用 false，省一个 shape；以后做"跟着水平旋转的碰撞盒"的大炮塔再打开）。
+   实测 "111"（293 零件）：**0 个独立盒 + 23 个合并盒 = 23 个 shape**（原来 293）；
+   10 台车 8 秒：**FPS 74~77、物理 8.4 ms/帧**（纯一件一盒是 22~25，整车方盒是 85~99）。
+   断言：`test_swivel_collider_flag`（默认并进合并盒；打开开关后炮塔单独一盒且对应零件下标）。
+   备选：`_rebuild_chassis_hull()` 那个"带 `HULL_BEVEL` 裙边倒角的凸包"（单 shape）。
+   原来是一个 AABB 方盒，但方盒的**平底 + 直角**上坡时会铲进地形、把车卡在坡上（用户 2026-10-19 报的）；
+   改成"每个零件一个盒子"实测 10 台车 **FPS 22~25**（293 个 shape/台，不可用）；最后折中成
+   **一个凸包**：外形仍是整车轮廓，但底面向内收 `HULL_BEVEL = 0.35` 格再抬高，形成裙边斜面。
+   掉零件时重建（跟着残骸缩）。实测 10 台重车：**FPS 64~66、物理 10.2 ms/帧**（方盒时 85~99 / 7.8 ms）。
+2. **零件级受击搬到 `hitboxes`**（静态 `StaticBody3D`，层 4 / 掩码 0，不参与物理）：
+   所有零件盒 + 轮胎盒合成**一张 trimesh**（`_rebuild_hitbox_trimesh()`）。命中后靠
+   **命中点落在哪个零件盒里**反查零件（`part_index_of_hit(..., point)`，命中很稀疏，O(零件数) 够用）；
+   零件被打掉后**立刻重建**（换一个新的 `CollisionShape3D`，不是改 shape 资源）：
+   - ⚠️ 重建**不能**被 `flush_visuals()` 里"没有脏视觉组就 return"的早退挡住（会永远不更新）；
+   - ⚠️ trimesh 必须 `backface_collision = true`（六个面用的是同一套顶点顺序，有一半是背面）；
+   - ⚠️ 重建出来的三角形是**当前活着的零件**：不重建的话"打剩一个核心"时子弹还打在已经不存在的
+     零件上，命中点反查不到活零件 → **打中不掉血**（2026-10-19 用户报的 bug）；
+   - ⚠️ **有零件掉的这一帧就立刻重建**（2026-10-19 用户要求，之前限流 0.2 秒太慢）：
+     残影会让准星打在"已经不存在的零件"上、看着就是"瞄着却打不中"。
+     一次重建 ~3.8 ms（303 个盒子），只有真掉零件的帧才触发，而且零件越掉越便宜；
+   - ⚠️ 三角形必须**朝外绕**（每个面按外法线检查、反了就翻过来）：六个面用同一套顶点顺序时
+     有一半是背面，而 `backface_collision` 在 Jolt 下靠不住 —— 从上往下打（准星瞄车顶）的射线会
+     **穿过**受击盒，看着就是"瞄着车顶却打天上"（用户 2026-10-19 报的）；
+   - `Projectiles.hit_filter`（测试场注入 `TestField._hit_is_real()`）仍然保留，作为**兜底**：
+     万一命中点反查不到活零件（数值误差 / 重建那一帧的竞态），子弹会 `_pass_through()`
+     **穿过去**继续打后面的东西，而不是被吞掉（"虚空挡伤害"）；
+3. **子弹射线忽略车体**（`Projectiles.ignore_rids`），自己的判定登记**车体 + 受击盒两个 RID**
+   （`hit_plan()` 支持数组）—— 否则"打自己"会算成伤害；
+4. **人机/靶子的整圈射线压到 0 条**（只剩悬挂那条；玩家仍是 16 条）；
+5. **人机轮胎每两个物理帧算一次**，另一帧直接沿用上一 tick 的接触力（延迟 8 ms，看不出来）；
+6. 射线查询对象**复用**（以前每条射线 new 一个 `PhysicsRayQueryParameters3D` + 一个 exclude 数组）；
+7. 引擎音效：调参进场缓存、超过 3D 声部最大距离直接跳过、每 2 个物理帧更新一次
+   （1.53 → **0.05 ms/tick**）；轮胎自转只在 200 米内更新；
+8. 掉零件后**射界按需重算**（2026-10-19 第二轮优化）：射界只取决于**枪管扇形** ——
+   `Turret.may_be_affected_by(box)` 用"转点为心、枪管长度（转点→枪口）为半径 + 盒子半对角线"
+   （和 `rebuild_arc()` 的预筛同一套口径，**不加 2 格余量**），再排除水平射界（`weapon_yaw_limit`）
+   之外的零件；只有命中的转塔排进队列，每车每帧最多重算 1 台（一台 ~1.1 ms，6 台全算就是 6.7 ms/轮）。
+   实测 8 秒实战 24~37 个零件损失 → **只重算 9~14 次**（按旧逻辑约 150~220 次）；
+   `TestField._arc_rebuilds` 是累计计数器。
+9. **伤害结算按帧打包**（2026-10-19，用户朋友的建议 + 查到的同类做法）：高射速机炮一秒几十上百发，
+   逐发 `apply_damage()`（连通性检查 / 禁用 shape / 同步质量重心）+ 逐套毁伤善后是集中交火掉帧的主因。
+   现在 `_on_projectile_hit()` 只把伤害**累加**到 `_damage_batches`（每车每零件一份），
+   `_physics_process()` 末调 `_flush_damage_batches()`：**每车每零件每帧只结算一次**，
+   死了的零件合并成一次 `_on_parts_destroyed()`（碎片也只爆一簇，位置取这一帧最后一次命中点）。
+   同类参考：Unity 的 `RaycastCommand.ScheduleBatch`（一批射线合并成一个 job）、
+   按 tick 结算伤害的服务器模型（低 tick 率会有假命中/延迟结算的取舍）。
+   命中点反查零件也改成 **O(1) 格子表**（`VehicleRig._fill_cell_map()` / `_cell_part`）：
+   3000 次微基准 **273 → 100 µs/次（2.7×）**；找不到时仍退回原来的线性扫兜底。
+   断言：`test_part_lookup_fast_path_matches_brute_force`（快路径必须和暴力扫结果一致）；
+   **开火音效也按帧合并**（`_queue_shot_sfx()` / `_flush_shot_sfx()`）：一帧最多播 `SFX_MAX_PER_FRAME = 3` 发，
+   优先离镜头近的，被丢掉的按数量补音量（+6 dB 封顶）—— 60 台枪同时打时不再每发都抢一个 3D 声部。
+   分段实测（10 台车混战，每 tick）：**轮子 8.7~9.4 ms**（最大头）、射界 1.5~1.7、AI 1.3~1.4、
+   武器+射弹+伤害+音效合计 **0.5~1.0 ms** —— 射击链路已经不是瓶颈了。
+10. 零件受击的视觉重建/射界/trimesh 全部**每物理帧合并一次**（见 `flush_visuals()`）；
+   受击盒 trimesh **有零件掉的这一帧就重建**（3.8 ms / 1 万多个三角形，只在该帧付一次）。
+
+2026-10-19 再降一档（用户要求"轮子射线 16→8、物理频率减半"）：
+`WHEEL_RAYS = 8`、`physics_ticks_per_second = 60`。10 台重车实测 **FPS 143~144、物理 8.4 ms/帧**
+（之前 120 Hz + 16 射线：32~36 FPS / 11~12 ms）。轮子数学占主线程时间减半，是这次收益的来源；
+代价是悬挂/轮胎响应频率从 120 变成 60 Hz（物理插值仍开着，画面不受影响），手感要用户实测确认。
+⚠️ 60 Hz 下**不能**再把 AI 轮子降到 20 Hz（`BOT_WHEEL_INTERVAL = 3` 试过）：悬挂力过期 50 ms，
+车离地了力还在往上顶 —— AI 车会**不停弹跳**（竖直速度 6 秒翻转 13~20 次、峰值 8~12 格/秒，用户 2026-10-19 报的）。
+现在 `BOT_WHEEL_INTERVAL = 1`（每帧算，60 次/秒，和"以前 120 Hz × 隔帧"总量一样）：翻转降到 1~3 次，
+10 台车混战 **FPS 126~127、物理 11~13 ms/帧**。
+
+结果（同一台机器、debug 版、8~15 秒实战）：物理 **21 → 8 ms/步**，物理 tick 稳定 120/s，
+重车场景 FPS **9 → 31~53**（受机器负载影响）；轻车场景 5.1 ms/步、144 FPS。
+
+⚠️ **改这些地方时注意**：射界判定（`Turret.rebuild_arc()`）读的是 `VehicleRig.part_boxes()`
+（每零件本体盒），**不是**车体的 shape（车体现在只有一个整车盒，拿它会把射界全堵死）。
+
+### 验证
+
+* 无头跑一局（30 秒游戏时间）：进场 86 ms（10 台车 + 场地），物理 tick 稳定在 **120/s**
+  （`Engine.get_physics_frames()` 实测），窗口内 128~144 FPS、draw ≈ 350、图元 ≈ 90k；
+  两队 15 秒内交火，30 秒内出现击毁、弹丸命中计数 800+。
+* 断言（`tests/test_battle.gd`）：场地 500 米 / 起伏 < 25 米 / 坡度 ≤ 20° / 有掩体；
+  出生点贴地、场地内、面对面且相隔 > 150 米；`steer_towards` 左为正；`lead_point` 提前量；
+  结束后输赢不再被改写。
+
+### 载具存档位置：任何启动方式都能改（2026-10-19 追加）
+
+导出版里 `res://` 是**只读**的（内容打进 .pck），所以以前在 `dist` 里启动时，建造模式保存会失败
+（写不进 `res://data/vehicles`）。现在所有"载具文件在哪"的问题统一走 `scripts/vehicle_store.gd`：
+
+* **写入目录**：导出版 = `user://data/vehicles`（Windows: `%APPDATA%\Godot\app_userdata\pixel war\data\vehicles`）；
+  编辑器 / 直接跑工程 = `res://data/vehicles`（文件仍在工程里，看得见、能进版本库）；
+* **读取**：两个目录都扫，`user://` 优先（同 id 覆盖），工程自带的车照样能读 ——
+  所以导出包里原来的 7 台车都在，玩家改过的版本也不会丢；
+* 保存自动建目录（`ensure_write_dir()`）；删除只删 `user://` 的文件（工程里的只读，导出版会拒绝）；
+  改名遇到工程自带的只读车时，会**复制一份到 `user://` 再改**，不动安装包里的原文件；
+* `VehicleDef.load_all()` 只是工具，目录选择归 `VehicleStore.load_all()`。
+
+断言：`tests/test_vehicle_store.gd`（导出版写入 user://、列表合并两个目录、改名/删除、
+自带车改名会复制而不是改坏原文件）。
+
+### 建造模式的"零件多了就卡"（2026-10-19 追加）
+
+建造时每放一块零件都会走 `BuildMode._rebuild_parts()`：整张 `PlacedParts` 重建 + **连接点标记全量重扫**。
+实测 400 件时一次 **52 ms（最慢 81 ms）** —— 每放一块就卡一下，越造越卡。
+
+改法：
+* **放零件改成增量追加**（`_append_parts(from_index)`）：往已有的 MultiMesh 里追加一个实例
+  （容量按 64 起步翻倍预留，只用 `visible_instance_count` 加减；扩容会清空实例数据，所以扩容后重写一遍），
+  不再整表重建。实测 **0.33 ms/块**；
+* **拆零件只重建"被拆到的那一组"**（`_remove_parts()` → `_rebuild_group()`，2026-10-23）：
+  一开始试过"把末尾实例搬到被删位置 + `instance_count -= 1`"，结果出现**幽灵零件**
+  （格子里还有、外观没了）—— 根因是 Godot 里改 `MultiMesh.instance_count` 会**清空所有实例数据**，
+  swap/缩容很容易和 `entries` 错位。现在改成按组重建（O(这一组的零件数)，400 块同类 ~0.6 ms），
+  视觉和格子**一定对得上**；连接点标记仍交给限流重建；
+* **连接点/基准格标记限流重建**（`_markers_dirty` + `_markers_due`，最多 6 Hz）：
+  放零件时只追加那一件的标记（`_append_markers()`），拆零件时才整表重扫，而且不阻塞这一帧。
+  整表重建从 52 ms 降到 **0.6 ms**。
+
+### 零件破碎碎片（2026-10-19 追加）
+
+零件被摧毁时炸出几块**体素碎片**：纯视效 —— 没有碰撞、不参与物理、不挡子弹。
+
+* `scripts/debris.gd`（`Debris`，`MultiMeshInstance3D`）：所有碎片装进**一个 MultiMesh**（每块一个实例 +
+  顶点色），几百块也只占 1 个 draw call；`burst()` 在零件位置炸出 `CHUNKS_PER_PART = 5` 块；
+* 运动：初速（随机方向 + 向上）继承车体速度的一部分 → 重力 → 空气阻尼 → 自转，
+  寿命 `CHUNK_LIFE = 1.15` 秒，最后 0.3 秒缩小消失（不玩透明度，省一份透明材质）；
+* **颜色直接来自零件本身**：`PartDef.debris_palette()` = 这个零件用到的**所有体素颜色**
+  （去重、最多 12 种，第一次算完缓存）；每块碎片随机挑一个，再乘 0.85~1.15 的亮度抖动 ——
+  所以多色零件（机枪：黑管 + 军绿 + 黄）炸出来是混色的，单色零件就是它自己的颜色；
+* 触发点：`TestField._on_parts_destroyed()` → `_spawn_debris(veh, rig, dead, hit_point)`：
+  **碎片爆在子弹的命中点**（`DEBRIS_HIT_RADIUS = 2.5` 格内的死零件都算这一处）；
+  以前按"每个死零件盒的中心"爆，一发穿透串起来的断连零件可能分布在全车，看着就是
+  "打这里、别处虚空爆炸"（用户 2026-10-19 报的）。碎片只继承 **35%** 车速（继承太多会拖出一串"虚空"碎片）；
+* 上限 `MAX_CHUNKS = 240`（满了顶掉最老的），一帧最多迭代这么多块 —— 开销可以忽略。
+* 断言（`tests/test_debris.gd`）：炸出固定块数 / 会动 / 受重力 / 寿命到了清空 / 池子上限 / 颜色来自零件。
+
+### 头顶血条 / 名字 / 小地图 / 底部状态条（2026-10-18 追加）
+
+* **底部状态条**（`scripts/battle_combat_hud.gd`）：屏幕底部中央一条**蓝色能量条**
+  （宽度 = 屏幕的 `BAR_WIDTH_RATIO = 0.5`，离底边 28 像素），左边一个**绿色血圈**
+  （圆弧 = 剩余全部零件生命值 / 满血，圈里写百分比；玩家被打光时显示 `--`）。
+  全部 `_draw()` 画、分辨率无关；`bar_rect()` / `health_center()` 是纯函数，
+  测试 `test_combat_hud_layout` 钉住了"半屏宽 / 居中 / 血圈在左边且在屏幕内"。
+* **血条 = 剩余全部零件生命值 / 满血**（`VehicleState.health_fraction()`，`hp` 数组求和），
+  名字在血条上方、同色；**我方蓝 `(0.36,0.62,1.0)`、敌方红 `(1.0,0.32,0.28)`**
+  （`BattleMode.FRIENDLY_COLOUR / ENEMY_COLOUR`，测试 `test_team_colours_are_blue_and_red` 守着）。
+  人机没有用户名，直接用**载具名**（`bot_*.vehicle.txt` 里的 `name`，即"人机·轻型"/"人机·双枪"）。
+* 画法：`scripts/vehicle_nameplates.gd` —— **屏幕空间**（`Camera3D.unproject_position`），
+  按距离缩放（`SCALE_DISTANCE = 240`，0.55~1.25 倍），超过 800 格不画；
+  相机背后/出界的自然被裁掉。放在 HUD 最底层（`move_child(..., 0)`），开镜时会被镜筒遮罩盖住。
+* 小地图：`scripts/battle_minimap.gd`，左上角 190×190。缩略图由
+  `BattleArena.map_image()` 生成：**亮色地图**（高度分色 + 西北方向 hillshade）而不是直接拿地面的
+  albedo —— 那套颜色是给 3D 打光的，贴到小地图上会黑成一片、高频色斑缩到 190 像素还会变成"阴影网格"；
+  掩体是烘进图里的暖灰点（3×3），
+  每帧只画"几个点 + 玩家白箭头 + 边框"（实测加完这层 draw 从 ~350 涨到 ~430，帧率 138~142）。
+  位置点都带深色描边（亮色地图上纯色小圆点容易糊），玩家白色箭头指向车头（`yaw` → 地图方向 `(cos, -sin)`）。
+* **标记规则**（用户要求，2026-10-18 第二版）：
+  - **自动标记**：敌人必须**连续**出现在某个友方载具的视野里满 `SPOT_TIME = 1 秒`
+    才亮（`advance_spot()`：中间断一帧就重新计时），而且**只在 200 米以内生效**
+    （`AUTO_SPOT_RANGE = 400 格`）。再远就看不见 —— 得靠手动或命中；
+  - **全队共享**：任何一个友方（含 4 个人机队友）看到都算（`_team_sees()`）；
+  - **手动标记**：准星附近**按 Q**（`MARK_ACTION = "mark_target"`）。实现是把每台敌车的
+    **重心**投到屏幕上，取离屏幕中心最近（容差 `MANUAL_MARK_SCREEN_RADIUS = 90 px`）、
+    距离 ≤ `MANUAL_MARK_RANGE = 750 米`、且在视线内的那台，立刻点亮。
+    ⚠️ 视线射线必须 `exclude` 玩家自己的车（相机在车后 28 格、准星压在车顶上，
+    不排除的话第一下永远打在自己车上）；瞄点用**重心**而不是"原点 + 固定高度"
+    （被打成只剩核心的车很矮，抬高 1.5 格会从残骸头顶飘过去）；
+  - **被友方子弹命中也会标记**：`_on_projectile_hit()` 里跨队命中后调
+    `_on_vehicle_damaged(rig)`，对战模式接住 → `_mark_enemy(veh, "被友方子弹命中")`；
+  - 已经标记的敌人，**全部友方都看不见之后 0.5 秒**（`SPOT_LOST_TIME`）才熄灭；
+  - 视野 = 距离（自动 200 米）+ 视野锥 + 视线：玩家用**当前相机 FOV**（开镜变窄，和画面一致）
+    + 4° 余量；人机车头 ±75°；视线被地形/掩体/别的车挡住不算；
+  - 未标记的敌人：**头顶血条、名字、小地图红点全部不画**；友方点/血条永远可见。
+  断言：`test_spotting_requires_a_continuous_second`、`test_mark_rules`、
+  `test_view_cone_blocks_behind_and_side`、`test_minimap_projection`、`test_vehicle_health_fraction`。
+
+---
+
+## ESC 暂停菜单（测试场 / 人机对战共用，2026-10-18）
+
+`scripts/pause_menu.gd`（`PauseMenu`，CanvasLayer `layer = 100`、`process_mode = ALWAYS`），
+由 `TestField._build_pause_menu()` 建一份、两种模式都继承。**ESC 不再直接回主界面**：
+
+| 按钮 | 行为 |
+| --- | --- |
+| 返回战斗 | `close()`：解除暂停、重新锁定鼠标 |
+| 游戏设置 | 展开 `GameSettings.build_ui()` —— **和主界面「游戏设置」是同一份代码/同一份存档**，天然一致 |
+| 自爆 | 二段确认（先点"自爆"再点"确认自爆"），走正常毁伤流程把玩家零件全打爆 → 对战里算你被击毁 |
+| 返回主界面 | 先 `teardown_match()` 拆干净这一场，再 `change_scene_to_file(主界面)` |
+
+**"暂停"到底怎么暂停**（踩过的坑）：
+
+* 只设 `get_tree().paused = true` 只会停**脚本**（`_physics_process` 不跑了），
+  但 3D 物理服务器还在积分 —— 车会带着速度继续滑、坠下去。
+  所以 `PauseMenu.open()` 里同时 `PhysicsServer3D.set_active(false)`，恢复时再 `true`。
+  实测：暂停 30 帧玩家车位移 **0.0000**。
+* 引擎循环音是 `AudioStreamPlayer`，不归 pause 管 —— 开菜单时把各车的
+  `stream_paused` 置 true，恢复时置回（否则菜单里一直嗡嗡响）。
+* 菜单本身必须 `PROCESS_MODE_ALWAYS`，否则暂停后按钮和 ESC 全都不响应。
+
+**返回主界面为什么要"拆一遍"**：用户报过"返回再进战斗会回到上一场、光效和队友敌人渲染两次"。
+我用 `change_scene_to_file` 复现（主界面按钮进战斗 → 注入 ESC → 再进）时是干净的
+（两场都是 10 台车 / 17 个转塔 / 116 个网格 / 1 个 WorldEnvironment），但为了让"下一场一定是全新一局"
+变成**代码保证**而不是"应该没问题"，`TestField.teardown_match()` 会显式释放：
+每台车的 chassis（连带转塔/轮胎）、射弹池、瞄准标记、相机、场地根节点，清空
+`_vehicles/_wheels/_turrets/_clip_boxes/_enemies/_team_of_key`、`_spot`（子类 `_teardown_mode()`）、
+`pending_vehicle`，并把 `paused` 和 `PhysicsServer3D.set_active(true)` 复位，再换场景。
+
+---
+
+## 声音：所有车都有引擎声和枪声（3D 声部，2026-10-18）
+
+以前只有玩家车有声音（开火声走 2D 池子、引擎声只给玩家建了一个 `AudioStreamPlayer`），
+队友/敌人是哑的。现在：
+
+* **每台车一个 `AudioStreamPlayer3D`**（`veh["audio"]`，挂在底盘上）——位置自动跟着车走；
+  音量仍然由"油门按住多久"驱动（人机没有存油门，用**实际速度/50** 当负载），
+  音高也从 `pitch_low` 升到 `pitch_high`；车被打光（`alive = false`）就停。
+* **开火声**：`_play_world_sfx(muzzle_position, ...)`，32 个 3D 声部轮着用（10 台车一起开火
+  也不会互相打断），位置就是**真枪口**。自爆也用同一个函数（降音高、加 6 dB）。
+* **距离衰减 + 左右声道**交给 `AudioStreamPlayer3D`（`scripts/spatial_audio.gd` 只负责配置）：
+  - `unit_size = 40` 格（**20 米内满音量**）；
+  - `max_distance = 700` 格（**350 米外静音**）；
+  - `attenuation_model = INVERSE_DISTANCE`、`panning_strength = 1.0`；
+  - `doppler_tracking = DISABLED`（车战里多普勒只会让人误判谁在动）。
+  听者是**当前 Camera3D**（第三人称镜头）。实测 `viewport.get_camera_3d() == _camera`。
+* 为什么不用手算 pan：Godot 4 的 `AudioStreamPlayer` **没有 pan 属性**
+  （`pan` 只在 AudioStreamPlayer2D/3D 上），手算就得用两个单声道声部拼左右，声部翻倍。
+  3D 声部是引擎原生实现，还自带衰减曲线。
+* 3D 定位要求素材是**单声道**：`engine_loop.wav` 是 1 声道、`machine_gun_shot.mp3` 的帧头
+  channel mode = 3（mono），都能正常定位。
+* 断言（`tests/test_audio.gd`）：满音量距离 40 格 / 静音距离 700 格；`configure()` 把
+  `unit_size`/`max_distance`/`panning_strength`/多普勒配成上面这组；引擎音量映射单调。
+
+---
+
+## 视野行程缩小 + 战斗结束后 ESC 回主界面（2026-10-18 第三版）
+
+* **视野上限**：用户嫌"能拉得太远"，只改上限 —— 最窄 `CAMERA_FOV_MIN = 30°` 不动，
+  可调行程从 70° 缩到 **23°**（约 1/3），所以 `CAMERA_FOV_MAX = 53°`；
+  默认视野 `CAMERA_FOV` 也跟着改成 53°（原 70° 已经超出上限）。滚轮步进仍是 2.5°/格
+  （9 格走完，和以前一样"一格一格"的手感）。
+  `look_sensitivity_scale()` 的参考视野就是 `CAMERA_FOV`，所以默认视野下灵敏度仍 = 1.0。
+  断言：`test_camera_fov_wheel_and_scope_zoom` 里钉了"行程 23°"和"撞上限"；
+  `test_look_sensitivity_follows_zoom` 改成按 `CAMERA_FOV` 取参考值（以后调视野不会再假失败）。
+* **胜利/失败后 ESC = 回主界面**：`BattleMode._unhandled_input()` 里 `_battle_over` 时
+  直接 `_quit_to_menu()`（不再弹暂停菜单）。`TestField._quit_to_menu()` 是唯一出口：
+  解除暂停 → 恢复物理 → `teardown_match()` 拆场 → 换场景。
+* **结束收尾延迟执行**：`_finish_battle()` 只置标志位，`Input.mouse_mode = VISIBLE` /
+  写状态 / 刷 HUD 挪到 `_apply_battle_finish.call_deferred()`。
+  原因：结束可能发生在 `Projectiles.step()` 的命中回调里（物理回调内部），
+  在里面改鼠标模式会出怪问题。
+* **修掉一个真实的脚本错误**：引擎声部换成 `AudioStreamPlayer3D` 之后，
+  `_set_audio_paused()` 还写着 `var player: AudioStreamPlayer` →
+  每次暂停/恢复都报 "Trying to assign AudioStreamPlayer3D to AudioStreamPlayer"。
+  在编辑器开着 "Break on Error" 时，这会把游戏**断在调试器里**（表现就是"卡死"）。
+
+### 主界面记住上次选中的机库（2026-10-18）
+
+以前每次进主界面都 `select_vehicle(_vehicles[0].id)`（列表第一台），从测试场/对战回来就跳回最上面。
+现在：
+
+* `GameSettings.selected_vehicle()` / `set_selected_vehicle(id)`：存在**同一个** `user://settings.cfg`
+  的 `[garage] selected_vehicle`（空 id 不写，免得把记录擦掉；读不到返回空串）。
+* `MainMenu._ready()`：读记录 → `select_vehicle(记住的 id)`；id 不存在（车被删了）才退回列表第一台。
+* `MainMenu.select_vehicle()`：每次切车顺手写一次记录 —— 所以"进建造/测试场/对战再回来"、"退出游戏重开"
+  都回到同一台。
+* 断言：`tests/test_settings.gd::test_garage_remembers_selection`（默认空 / 读写 / 覆盖 / 空 id 不覆盖）。
+
+---
+
+## 手动摆放掩体 / 出生点：`scenes/battle_arena.tscn`（Godot 编辑器里拖，2026-10-18 第四版）
+
+**主入口是编辑器场景**，不是文本文件了：
+
+```
+Scenes/battle_arena.tscn
+ BattleArena (scripts/battle_arena.gd，@tool：编辑器里自动铺一张地面预览，owner=null 不存盘)
+   ├─ Cover   ← 石头/崖壁：每个都是 nature_kit 的 .glb **实例**，用 W(移动) / R(缩放) / E(旋转) 直接改
+   ├─ Decor   ← 树/灌木（不挡车，只挡视线？不，纯装饰；也不挡子弹）
+   └─ Spawns  ← Team0_0…Team0_4 / Team1_0…Team1_4：Marker3D，拖位置 + 转朝向
+```
+
+* **加一块石头**：选中 `Cover` 里任意一个石头 → `Ctrl+D` 复制 → 拖到新位置、`R` 缩放；
+  要换模型就在"检查器"里把它的场景换掉（或从 `assets/arena/nature_kit/` 拖一个 .glb 进 `Cover`）。
+* **删掉** = 游戏里也没了；**整体挪/转/缩放 `Cover`** 也行（碰撞用的是世界 AABB）。
+* **出生点**：拖 `Spawns/Team0_x` 的 Marker3D，转它改车头朝向。**`Team0_0` 就是玩家自己**，
+  后面 4 个是队友，`Team1_*` 是敌人。⚠️ 不要移动/旋转 `Spawns` 节点本身（marker 用的是相对它的本地变换）。
+* 保存场景（Ctrl+S）→ 进战局就按场景摆，**不用重启编辑器、不用改代码**。
+
+**运行时怎么处理**（`BattleArena._build_props_from_scene()`）：
+
+* 视觉：`Cover`/`Decor` 里所有 MeshInstance3D 按**网格**合批成 MultiMesh（7 个节点）——
+  源节点只是编辑器里的摆放工具，运行时 `visible = false`；
+* **装饰（树/灌木）全部常驻**（2026-10-18 用户要求改回）：不再按距离加载/卸载 —— 之前"300 米内才画"会在边界整批消失/出现，看着像闪一下；现在 7 个合批节点、300 个实例一直渲染，数量由 `data` 里的 `TREE_COUNT/BUSH_COUNT`（重新烘焙）或直接在 `scenes/battle_arena.tscn` 的 `Decor` 里增删节点决定。
+* **MultiMesh 的物理插值必须关掉**（`RenderingServer.multimesh_set_physics_interpolated(rid, false)`，
+  装饰和车体分组都要）：这两处的实例数组都会在运行时**整体重排**（装饰按距离、车体按存活零件）。
+  开着插值的话，重排那一帧渲染器会把"新实例"和"上一帧同一个下标的实例"插值一遍 ——
+  看到的就是**树突然挪了位置、车身突然少几个零件，一帧后又恢复正常**（用户 2026-10-18 报的闪烁）。
+  车体的整体移动靠父节点（刚体）的插值，每个实例本身是静态的，不需要插值。
+* 碰撞：把所有掩体的**三角形**合成一张 **trimesh**（`ConcavePolygonShape3D`，一个 `CoverBody`）—— 凹进去的地方真能塞进去、斜石头不再挡出一圈空气墙；500 米场地实测 7602 三角，物理仍稳定 120 tick/s；
+* 小地图灰点：只来自**实体掩体**（`cover_points` 条数 == 掩体数，树/灌木不在里面），
+  从每个掩体的包围盒中心来（米）。
+
+**重新烘焙一版**（改了自动摆放参数、或想从零再撒一遍）：
+
+```
+godot --headless --path . --script res://tools/bake_arena_scene.gd
+```
+
+会**覆盖** `scenes/battle_arena.tscn`（500 米场地：约 115 掩体 / 300 装饰 / 10 出生点）。
+
+**兜底顺序**：场景里 `Cover`/`Decor` 有子节点 → 用场景；没有 → 文本布局
+（`data/arena/battle_layout.txt`，可选，格式见 `LAYOUT_PATH` 注释）；再没有 → 程序化自动生成。
+出生点同理：Marker3D → 文本 `spawn` 行 → ±110 米自动列阵。
+
+断言：`tests/test_battle.gd::test_manual_layout`（文本布局解析/优先级）与
+`test_scene_spawn_markers`（场景 Marker 优先于文本布局）。
+## 测试的统计口径（"TOTAL= / ASSERTS=" 是什么意思，2026-10-18）
+
+`tools/run_tests.gd` 现在打印：
+
+```
+TOTAL=223 FAILED=0 ASSERTS=7641（223 个测试方法 / 7641 条断言）
+```
+
+三个词的含义：
+
+| 说法 | 是什么 | 当前数量 |
+| --- | --- | --- |
+| **suite（套件）** | `tests/test_*.gd` 一个文件 | 17 个 |
+| **测试方法** | 套件里一个 `func test_*` | 223 个 |
+| **断言** | 代码里一次 `assert_true/eq/gt/...` 调用（一个方法里常有几十条） | 7641 条 |
+
+`FAILED` 数的是**测试方法**（一个方法里任何一条断言挂了，这个方法就算失败；后面的断言还会被计数但不再改变结果）。
+
+⚠️ **踩过的坑**：插件 runner 的 `_results` 是 `Array[Dictionary]` 类型属性，
+`runner.set("_results", [])` 这种清空方式在类型不匹配时**不会真的清空**，于是上一版脚本把
+"累计方法数"当成了总数，报出 `TOTAL=1979` —— 那个数字既不是断言数也不是套件数。
+现在每个套件都新建一个 `McpTestRunner`，数字才是干净的。
+
+**0 失败**。曾经红过的那条（`test_twin_mg_reuses_the_single_turret_geometry` 的"每发更费电"）已经清理掉了：
+用户确认**只比每秒耗能**，不比每发单价 —— 双联装 rpm 900、单连装 500，每发都是 100 时，
+每秒是 1500/s vs 833/s，本来就"更费"。现在那条断言比较 `energy_cost / fire_interval_seconds()`。
+
+**只跑相关套件**（日常改代码别全跑）：
+
+```
+godot --headless --path . --script res://tools/run_tests.gd -- --suite=weapon
+godot --headless --path . --script res://tools/run_tests.gd -- --suite=weapon,battle --filter=twin_mg
+```
+
+`--suite` 认 `suite_name()` 或文件名（`test_weapon.gd` → `weapon`）；`--filter` 是方法名子串。

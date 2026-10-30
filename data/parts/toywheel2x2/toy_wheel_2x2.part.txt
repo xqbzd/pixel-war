@@ -1,22 +1,33 @@
-# 车轮（2x2）：轮轴本体 + 轮胎子模型。每个轮轴使用自己的这组参数。
-name = 车轮（2x2） / Wheel 2x2
-model = res://data/parts/wheel2x2/2x2轮轴.vox
-cubes = 2 2 1
-render = voxel
-order = 60
+# 玩具轮胎（2x2）：轮轴本体 + 轮体（轮胎）子模型，画在**同一个** 2x2玩具轮胎.vox 里。
+#
+# 一个零件 = 一个建模文件（2026-10-15 起的约定）：
+#   子模型 0 = 轮轴（32 x 19 x 16 体素 = 2 x 2 x 1 格）
+#   子模型 1 = 轮体（15 x 32 x 32 体素，外径 2 格）
+# 两个物体的**相对位置由画布说了算**：轮轴在画布 y 13..32 / z 16..32，
+# 轮体在 x 31..46 / y 0..32 / z 8..40 —— 于是轮体正好挂在外侧那一格、轮心比轮轴中心低 6.5 体素
+# （= 原来那种"两个文件 + 手写 wheel_offset"调出来的同一个位置，现在不用手写了）。
+
+name = 玩具轮胎（2x2） / Toy Wheel 2x2
+
+category  = 行驶
+model     = res://data/parts/toywheel2x2/2x2玩具轮胎.vox
+cubes     = 2 2 1
+render    = voxel
+order     = 60          # 零件顺序：排在结构件之后、机枪之前
+# 连接点：装到车上的那一面是 -x（轮子朝 +x 往外挂，轮胎就在那边）
 connections = -x +y +z -z
-wheel_body = res://data/parts/wheel2x2/2x2轮体.vox
-# 模型偏移的单位为体素，使用游戏内 Y-up 坐标。
-wheel_offset = 32 -16 -8
+# 轮体 = 同一个 .vox 里的第 1 号子模型（0 = 轮轴）
+wheel_body_model = 1
+# 模型偏移的单位为体素，使用游戏内 Y-up 坐标（轮轴整体下移 3 像素，轮体跟着一起动）
 model_offset = 0 -3 0
 weight = 100
 hp = 4000
-pp = 10
+pp = 20
 
 # 动力和转向。速度使用真实 m/s；内部标定 1 格 = 0.5 米。
-wheel_engine_force = 15000       # 每个驱动轮的推力上限，格世界的力
-wheel_max_speed = 30             # m/s；推力接近限速时按余弦衰减至 0
-wheel_steer_max = 15             # 度
+wheel_engine_force = 16000       # 每个驱动轮的推力上限，格世界的力
+wheel_max_speed = 25             # m/s；推力接近限速时按余弦衰减至 0
+wheel_steer_max = 20             # 度
 wheel_steer_speed = 60           # 度/秒
 wheel_steer_return_speed = 240    # 松手回正速度，度/秒
 wheel_radius = 0                 # 0 = 按轮胎模型自动算
@@ -29,8 +40,8 @@ wheel_radius = 0                 # 0 = 按轮胎模型自动算
 # 初始硬点补偿静态压缩量，让轮胎保持建造时的高度。
 # 这里的静态压缩量不含 data/handling.txt 的额外下压力；下压力会让车身进一步下沉。
 # 毁伤会改变刚体重量、重心及存活轮数，但不会重新计算幸存车轮的悬挂参数。
-wheel_suspension_travel = 1.2     # 最大避震行程，格（1.2 格 = 0.6 米；最小 0.05）
-wheel_support_multiple = 8       # 触底支撑力倍率；默认 8，最小 1
+wheel_suspension_travel = 0.6     # 最大避震行程，格（1.2 格 = 0.6 米；最小 0.05）
+wheel_support_multiple = 12       # 触底支撑力倍率；默认 8，最小 1
 # 原有 stiffness / damper / rest_length / max_force / peak_force 等独立悬挂键已弃用。
 
 # 多射线接触：主射线控制悬挂，整圈射线探测台阶、路缘、坡脚及上方障碍。
@@ -42,7 +53,7 @@ wheel_ray_offset = 0.4           # 射线沿轮轴向外偏移（格）；不改
 
 # 侧向沿用 nani_raycast_wheel 的 Pacejka 轮胎曲线（MIT，见 reference/）。
 # 纵向直接给推力/刹车力，受支撑力 × long_peak × grip_factor 限制。
-wheel_grip_factor = 1
+wheel_grip_factor = 1.4
 wheel_lat_pacejka = 1 10 0 1.35
 wheel_long_pacejka = 1 10 0 1.65
 

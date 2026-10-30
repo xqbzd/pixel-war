@@ -1,4 +1,4 @@
-@tool
+﻿@tool
 extends McpTestSuite
 
 ## 武器（转塔）：零件定义 / 转轴推导 / 瞄准解算。
@@ -11,6 +11,7 @@ extends McpTestSuite
 
 const PART_DIR := "res://data/parts"
 const MG_ID := "light_mg"
+const TWIN_MG_ID := "light_mg_x2"
 
 
 func suite_name() -> String:
@@ -25,6 +26,10 @@ func _library() -> PartLibrary:
 
 func _mg() -> PartDef:
 	return _library().get_def(MG_ID)
+
+
+func _twin_mg() -> PartDef:
+	return _library().get_def(TWIN_MG_ID)
 
 
 ## 浮点比较（测试框架只给了 assert_eq）。
@@ -116,6 +121,80 @@ func test_light_mg_turret_axes() -> void:
 	var pivot := def.weapon_pivot()
 	assert_true(bool(pivot["ok"]), "转点应该推得出来：%s" % str(pivot.get("reason", "")))
 	assert_vec_almost_eq(pivot["pivot"], Vector3(1.5, 0.8125, 1.5), 0.01, "转点 = 枪轴与回转轴交点")
+
+
+## 转塔几何（枪管轴线 / 回转中心 / 转点）**只跟模型有关**，所以必须只推导一次：
+## 每装一台转塔重算一遍的话，一把枪要 0.6 秒（最外层扫描）× 车上枪数 ——
+## 用户报的"枪多的时候进测试场卡很久"就是这么来的。这里用"两次返回同一个对象"钉住缓存。
+func test_turret_geometry_is_cached_per_part() -> void:
+	var def := _mg()
+	if def == null:
+		return
+	var axis_first := def.weapon_barrel_axis()
+	var pivot_first := def.weapon_pivot()
+	var yaw_first := def.weapon_yaw_center()
+	# 再问一遍 = 测试场里"再装一台一模一样的转塔"：应直接命中缓存，不能重新推导
+	assert_true(is_same(axis_first, def.weapon_barrel_axis()), "枪管轴线应缓存，不再推导")
+	assert_true(is_same(pivot_first, def.weapon_pivot()), "转点应缓存，不再推导")
+	assert_true(yaw_first == def.weapon_yaw_center(), "回转中心的值应保持不变")
+
+
+## 双联装机枪：**同一套转塔代码**，只是模型里多了一根枪管、数值更重一档。
+## 三个子模型的序号和包围盒都和单连装一致，所以模型推导出来的转轴 / 转点 / 枪口必须逐个相同
+## —— 这条断言就是"双联装能完全套用单连装的代码"的可执行版本。
+func test_twin_mg_reuses_the_single_turret_geometry() -> void:
+	var single := _mg()
+	var twin := _twin_mg()
+	assert_true(twin != null, "缺少部件 %s" % TWIN_MG_ID)
+	if single == null or twin == null:
+		return
+	assert_eq(twin.warnings.size(), 0, "不该有警告：%s" % str(twin.warnings))
+	assert_eq(twin.weapon, "turret", "双联装也是转塔")
+	assert_eq(twin.weapon_yaw_model, single.weapon_yaw_model, "支架的子模型序号和单连装一致")
+	assert_eq(twin.weapon_pitch_model, single.weapon_pitch_model, "枪管的子模型序号和单连装一致")
+	assert_eq(twin.cubes, single.cubes, "同一个 48³ 场景")
+	assert_eq(twin.connection_faces(), single.connection_faces(), "底座是同一个，连接点也一样")
+	# 模型推导：转点 / 枪口 / 回转轴中心
+	assert_vec_almost_eq(
+		twin.weapon_pivot()["pivot"], single.weapon_pivot()["pivot"], 0.01, "转点"
+	)
+	assert_vec_almost_eq(twin.weapon_muzzle(), single.weapon_muzzle(), 0.01, "枪口")
+	assert_true(
+		twin.weapon_yaw_center().is_equal_approx(single.weapon_yaw_center()), "回转轴中心"
+	)
+	# 枪管那一件确实不一样（多了一根管子），但外框一样 —— 所以上面的推导不会变
+	var single_barrel := single.weapon_volume(single.weapon_pitch_model)
+	var twin_barrel := twin.weapon_volume(twin.weapon_pitch_model)
+	assert_true(
+		twin_barrel.solid_count() > single_barrel.solid_count(),
+		"双联装的枪管体素该更多：%d vs %d" % [twin_barrel.solid_count(), single_barrel.solid_count()]
+	)
+	assert_vec_almost_eq(
+		PartDef.tight_bounds(twin_barrel, Vector3.ZERO, Vector3.ONE).size,
+		PartDef.tight_bounds(single_barrel, Vector3.ZERO, Vector3.ONE).size,
+		0.01,
+		"枪管外框一样"
+	)
+	# 数值是双联装自己的（别和单连装混）：更狠、更重、更费
+	assert_true(
+		twin.weapon_rpm > single.weapon_rpm,
+		"射速更快：%s vs %s" % [twin.weapon_rpm, single.weapon_rpm]
+	)
+	assert_true(
+		twin.weight_kg > single.weight_kg, "更重：%s vs %s" % [twin.weight_kg, single.weight_kg]
+	)
+	assert_true(twin.pp > single.pp, "更费点数：%s vs %s" % [twin.pp, single.pp])
+	assert_true(twin.hp > single.hp, "血更多：%s vs %s" % [twin.hp, single.hp])
+	# 耗能只比**每秒耗能**，不比"每发单价"：双联装 rpm 更高，每发单价一样也会更费电。
+	# （2026-10-18 用户确认：原来那条"每发更费电"的断言是过时的，已删掉。）
+	var twin_drain := twin.weapon_energy_cost / twin.fire_interval_seconds()
+	var single_drain := single.weapon_energy_cost / single.fire_interval_seconds()
+	assert_true(
+		twin_drain > single_drain,
+		"每秒更费电：%.0f vs %.0f（每发 %.0f vs %.0f）" % [
+			twin_drain, single_drain, twin.weapon_energy_cost, single.weapon_energy_cost
+		]
+	)
 
 
 ## 基准格 + 连接点：一个基准格（最底层中心格）、**只有它那一格**朝下有连接点。
@@ -222,13 +301,21 @@ func test_core_energy_and_weapon_fire_parameters() -> void:
 	var def := _mg()
 	if def == null:
 		return
-	assert_eq(def.weapon_projectile, "bullet", "射弹类型：普通子弹")
+	# 机枪现在是**射线类**（瞬间命中，没有弹速/下坠/寿命，只有最大射程）
+	assert_eq(def.weapon_projectile, "ray", "射弹类型：射线")
+	assert_true(def.is_ray_weapon(), "is_ray_weapon() 应该认 ray")
+	assert_gt(def.weapon_ray_range, 0.0, "射线最大射程要 > 0（米）")
+	assert_almost_eq(
+		def.ray_range_cubes(), def.weapon_ray_range / PartDef.CUBE_METERS, 0.001,
+		"射程换算成格"
+	)
 	assert_gt(def.weapon_muzzle_speed, 0.0, "子弹初速度要 > 0")
 	assert_gt(def.weapon_damage, 0.0, "伤害要 > 0")
 	assert_gt(def.weapon_rpm, 0.0, "射速要 > 0")
 	assert_gt(def.weapon_traverse_speed, 0.0, "炮塔转速要 > 0")
 	assert_gt(def.weapon_energy_cost, 0.0, "每发耗能要 > 0")
-	assert_gt(def.weapon_projectile_life, 0.0, "弹丸寿命要 > 0")
+	# 射线类不看寿命（`weapon_projectile_life` 只对普通子弹有效），但文件里还有这个值，别是负数
+	assert_true(def.weapon_projectile_life > 0.0, "弹丸寿命要 > 0（普通子弹用）")
 	# 弹丸寿命夹在 [0.05, 120] 秒：0 会让子弹一出膛就死，太大就是"永不消失"（卡爆）
 	var short_life := PartDef.from_text(
 		"name = 短命弹\nshape = cube\ncubes = 1 1 1\nweapon_projectile_life = 0\n",
@@ -258,7 +345,7 @@ func test_core_energy_and_weapon_fire_parameters() -> void:
 ## 车轮限速的单位统一成 m/s：部件文件写 m/s，内部是格/秒（×1/CUBE_METERS）。
 ## 只验标定和量级 —— 具体限速是用户手调的（别写死 30 这种数）。
 func test_wheel_max_speed_is_in_real_meters_per_second() -> void:
-	var axle := _library().get_def("wheel_axle_2x2")
+	var axle := _library().get_def("toy_wheel_2x2")
 	assert_true(axle != null, "缺少轮轴部件")
 	if axle == null:
 		return
@@ -375,6 +462,151 @@ func test_projectile_lifetime_is_per_shot() -> void:
 	assert_eq(shots.live_count(), 1, "短命那发该没了，长命那发还在")
 	assert_almost_eq(float(shots._bullets[0]["life"]), 5.0, 0.0001, "剩下的是 5 秒那发")
 	shots.free()
+
+
+## 弹头（普通子弹）的四个新参数：**部件文件 → PartDef**。默认值必须和"加这个参数之前"一样，
+## 所以老部件文件不写这几行时完全不变（没后坐、没冲击、默认黄、不衰减）。
+func test_bullet_head_parameters_are_parsed() -> void:
+	var def := PartDef.from_text(
+		"name = 测试枪\nweapon = turret\ncubes = 1 1 1\n"
+		+ "weapon_recoil_impulse = 120\n"
+		+ "weapon_impact_impulse = 45\n"
+		+ "weapon_bullet_color = ff3355\n"
+		+ "weapon_damage_falloff = 0.08\n",
+		"res://data/parts/__test_bullet_head.part.txt"
+	)
+	assert_almost_eq(def.weapon_recoil_impulse, 120.0, 0.0001, "后坐冲量")
+	assert_almost_eq(def.weapon_impact_impulse, 45.0, 0.0001, "冲击冲量")
+	assert_true(
+		def.weapon_bullet_color.is_equal_approx(Color.html("ff3355")),
+		"弹头颜色应解析成 Color：%s" % str(def.weapon_bullet_color)
+	)
+	assert_almost_eq(def.weapon_damage_falloff, 0.08, 0.0001, "每百米衰减比例")
+
+	# 不写 = 默认：0 / 0 / 现在的黄色 / 0（老部件文件不受影响）
+	var plain := PartDef.from_text(
+		"name = 素枪\nweapon = turret\n", "res://data/parts/__test_plain.part.txt"
+	)
+	assert_almost_eq(plain.weapon_recoil_impulse, 0.0, 0.0001, "默认没后坐")
+	assert_almost_eq(plain.weapon_impact_impulse, 0.0, 0.0001, "默认没冲击")
+	assert_true(
+		plain.weapon_bullet_color.is_equal_approx(PartDef.DEFAULT_BULLET_COLOR),
+		"默认颜色 = 改之前那个黄色"
+	)
+	assert_almost_eq(plain.weapon_damage_falloff, 0.0, 0.0001, "默认不衰减")
+
+	# 写错颜色：退回默认色 + 留一条警告（别崩、别变成黑色）
+	var bad := PartDef.from_text(
+		"name = 坏色\nweapon = turret\nweapon_bullet_color = zzz\n",
+		"res://data/parts/__test_bad_colour.part.txt"
+	)
+	assert_true(
+		bad.weapon_bullet_color.is_equal_approx(PartDef.DEFAULT_BULLET_COLOR),
+		"写错颜色应退回默认色"
+	)
+	assert_gt(bad.warnings.size(), 0, "写错颜色要留警告")
+
+	# 衰减系数夹在 0~1（1 = 百米外完全没伤害）
+	var clamped := PartDef.from_text(
+		"name = 衰减\nweapon = turret\nweapon_damage_falloff = 3\n",
+		"res://data/parts/__test_falloff.part.txt"
+	)
+	assert_almost_eq(clamped.weapon_damage_falloff, 1.0, 0.0001, "衰减系数上限是 1")
+
+
+## 转塔要把弹头参数抄下来（部件文件 → 转塔 → `Projectiles.fire()`）。
+func test_turret_copies_bullet_head_parameters() -> void:
+	var def := PartDef.from_text(
+		"name = 测试枪\nweapon = turret\ncubes = 1 1 1\n"
+		+ "weapon_recoil_impulse = 120\n"
+		+ "weapon_impact_impulse = 45\n"
+		+ "weapon_bullet_color = 33ff88\n"
+		+ "weapon_damage_falloff = 0.08\n",
+		"res://data/parts/__test_turret_head.part.txt"
+	)
+	var turret := Turret.new()
+	# 没有模型：setup 会返回"读不出枪管模型"，但四个参数在**推导几何之前**就抄好了
+	turret.setup(def, Transform3D(), PartLibrary.new())
+	assert_almost_eq(turret.recoil_impulse, 120.0, 0.0001, "转塔抄下后坐冲量")
+	assert_almost_eq(turret.impact_impulse, 45.0, 0.0001, "转塔抄下冲击冲量")
+	assert_almost_eq(turret.damage_falloff, 0.08, 0.0001, "转塔抄下距离衰减")
+	assert_true(
+		turret.bullet_color.is_equal_approx(Color.html("33ff88")), "转塔抄下弹头颜色"
+	)
+	var spec := turret.bullet_spec()
+	assert_almost_eq(float(spec["falloff"]), 0.08, 0.0001, "bullet_spec 里的衰减")
+	assert_almost_eq(float(spec["impact_impulse"]), 45.0, 0.0001, "bullet_spec 里的冲击冲量")
+	assert_true(
+		(spec["color"] as Color).is_equal_approx(Color.html("33ff88")),
+		"bullet_spec 里的颜色"
+	)
+	turret.free()
+
+
+## 弹头参数是**每发**独立的：颜色染到曳光弹上、衰减/冲击冲量跟着这一发走。
+func test_projectile_applies_bullet_colour_and_falloff() -> void:
+	var shots := Projectiles.new()
+	var colour := Color.html("33ff88")
+	var spec := {"color": colour, "falloff": 0.1, "impact_impulse": 40.0}
+	var fired := shots.fire(
+		Vector3.ZERO, Vector3(0, 0, 1), 600.0, 0.0, 100.0, 5.0,
+		Vector3.ZERO, "player", Vector3.ZERO, spec
+	)
+	assert_true(fired, "开火应该成功")
+	var bullet: Dictionary = shots._bullets[0]
+	assert_almost_eq(float(bullet["falloff"]), 0.1, 0.0001, "衰减系数跟着这一发走")
+	assert_almost_eq(float(bullet["impact_impulse"]), 40.0, 0.0001, "冲击冲量跟着这一发走")
+	var tracer_material := (bullet["node"] as MeshInstance3D).material_override as StandardMaterial3D
+	assert_true(
+		tracer_material.albedo_color.is_equal_approx(colour),
+		"曳光弹应染成弹头颜色：%s" % str(tracer_material.albedo_color)
+	)
+	# 距离衰减：100 米 = 200 格（1 格 = 0.5 米），每百米 -10% → 90 点
+	assert_almost_eq(
+		Projectiles.damage_before_impact(100.0, 0.1, 200.0), 90.0, 0.0001, "飞 100 米 -10%"
+	)
+	assert_almost_eq(
+		Projectiles.damage_before_impact(100.0, 0.1, 0.0), 100.0, 0.0001, "没飞就不衰减"
+	)
+	assert_almost_eq(
+		Projectiles.damage_before_impact(100.0, 0.0, 5000.0), 100.0, 0.0001, "系数 0 = 不衰减"
+	)
+	assert_almost_eq(
+		Projectiles.damage_before_impact(100.0, 0.5, 400.0), 0.0, 0.0001,
+		"飞太远是 0 伤害（不会变成负数）"
+	)
+	# 弹着点火花也用同一个颜色
+	shots.spawn_impact(Vector3(1, 2, 3), colour)
+	var impact: MeshInstance3D = shots._impacts[0]["node"]
+	var impact_material := impact.material_override as StandardMaterial3D
+	assert_true(
+		impact_material.albedo_color.is_equal_approx(colour), "弹着点火花应同色"
+	)
+	shots.free()
+
+
+## 冲击冲量只推**刚体**（载具/靶子），静态地形推不动；0 = 不推。
+func test_impact_impulse_only_pushes_rigid_bodies() -> void:
+	var rigid := RigidBody3D.new()
+	var static_body := StaticBody3D.new()
+	assert_vec_almost_eq(
+		Projectiles.impact_impulse_vector(rigid, 40.0, Vector3(0, 0, 1)),
+		Vector3(0, 0, 40.0), 0.0001, "刚体：沿弹道方向推"
+	)
+	assert_eq(
+		Projectiles.impact_impulse_vector(static_body, 40.0, Vector3(0, 0, 1)),
+		Vector3.ZERO, "静态地形推不动"
+	)
+	assert_eq(
+		Projectiles.impact_impulse_vector(rigid, 0.0, Vector3(0, 0, 1)),
+		Vector3.ZERO, "0 = 不推"
+	)
+	assert_eq(
+		Projectiles.impact_impulse_vector(rigid, 40.0, Vector3.ZERO),
+		Vector3.ZERO, "没有速度方向就不推"
+	)
+	rigid.free()
+	static_body.free()
 
 
 ## 曳光弹要**盖住整条走过的线段**：用户报"子弹太不显眼"就是因为高速子弹只给 1.5 格的光。
@@ -857,3 +1089,122 @@ func test_tracer_thickness_does_not_depend_on_length() -> void:
 		)
 
 
+
+## 射线类武器（`weapon_projectile = ray`）：瞬间命中、只有最大射程，扩散/衰减照旧。
+func test_ray_weapon_definition() -> void:
+	var def := PartDef.from_text(
+		"name = 射线枪\nweapon = turret\ncubes = 1 1 1\n"
+		+ "weapon_projectile = ray\n"
+		+ "weapon_ray_range = 250\n"
+		+ "weapon_spread = 0.6\n"
+		+ "weapon_damage_falloff = 0.2\n",
+		"res://data/parts/__test_ray.part.txt"
+	)
+	assert_eq(def.weapon_projectile, "ray", "认 ray 类型")
+	assert_true(def.is_ray_weapon(), "is_ray_weapon() 为真")
+	assert_almost_eq(def.weapon_ray_range, 250.0, 0.001, "射程（米）")
+	assert_almost_eq(
+		def.ray_range_cubes(), 250.0 / PartDef.CUBE_METERS, 0.001, "射程换算成格"
+	)
+	assert_almost_eq(def.weapon_spread, 0.6, 0.001, "射线也吃扩散")
+	# 未知类型：留警告、退回普通子弹（不静默变射线）
+	var weird := PartDef.from_text(
+		"name = 奇怪枪\nweapon = turret\ncubes = 1 1 1\nweapon_projectile = plasma\n",
+		"res://data/parts/__test_plasma.part.txt"
+	)
+	assert_eq(weird.weapon_projectile, "bullet", "未知类型退回 bullet")
+	assert_true(weird.warnings.size() > 0, "未知类型要留一条警告")
+
+
+## 两把机枪（单连装 / 双联装）都换成了射线类，而且射程 > 0。
+func test_both_machine_guns_are_ray_weapons() -> void:
+	var library := _library()
+	for id in [MG_ID, TWIN_MG_ID]:
+		var def := library.get_def(id)
+		assert_true(def != null, "缺少部件 %s" % id)
+		if def == null:
+			continue
+		assert_eq(def.weapon_projectile, "ray", "%s 应该是射线类" % id)
+		assert_true(def.is_ray_weapon(), "%s 的 is_ray_weapon()" % id)
+		assert_gt(def.weapon_ray_range, 0.0, "%s 的射程要 > 0" % id)
+
+
+## 转塔把射弹类型 / 射程抄下来，交给 `Projectiles.fire_ray()`。
+func test_turret_copies_ray_parameters() -> void:
+	var def := PartDef.from_text(
+		"name = 射线枪\nweapon = turret\ncubes = 1 1 1\n"
+		+ "weapon_projectile = ray\nweapon_ray_range = 300\n",
+		"res://data/parts/__test_ray_turret.part.txt"
+	)
+	var turret := Turret.new()
+	turret.setup(def, Transform3D(), PartLibrary.new())
+	assert_true(turret.is_ray(), "转塔是射线类")
+	assert_almost_eq(turret.ray_range, 300.0 / PartDef.CUBE_METERS, 0.001, "转塔抄下射程（格）")
+	var spec := turret.bullet_spec()
+	assert_eq(str(spec.get("kind", "")), "ray", "bullet_spec 里的 kind")
+	assert_almost_eq(float(spec.get("range", 0.0)), turret.ray_range, 0.001, "bullet_spec 里的 range")
+	turret.free()
+
+
+## `fire_ray` 没空间 / 射程 0 时安全返回 false（不崩）。
+func test_fire_ray_guards() -> void:
+	var shots := Projectiles.new()
+	assert_true(
+		not shots.fire_ray(null, Vector3.ZERO, Vector3(0, 0, 1), 0.0, 100.0, 400.0, {}, "x"),
+		"没有物理空间就不该开火"
+	)
+	assert_true(
+		not shots.fire_ray(null, Vector3.ZERO, Vector3(0, 0, 1), 0.0, 100.0, 0.0, {}, "x"),
+		"射程 0 也不该开火"
+	)
+	shots.free()
+
+## 射界"按需重算"：只有**转点附近**的零件掉/没了才需要重算这台转塔（远离它的零件掉不掉无关）。
+func test_turret_arc_influence() -> void:
+	var library := _library()
+	var def := library.get_def(MG_ID)
+	assert_true(def != null, "缺少 %s" % MG_ID)
+	if def == null:
+		return
+	var turret := Turret.new()
+	var problem: String = turret.setup(def, Transform3D(), library)
+	if not problem.is_empty():
+		# 模型没导入（干净 checkout）时跳过这条，不把环境问题当失败
+		turret.free()
+		return
+	var pivot: Vector3 = turret.pivot_point()
+	var radius: float = turret.arc_influence_radius()
+	assert_gt(radius, 0.5, "影响半径应该 >= 转点到枪口的距离")
+	# 贴着转点的零件：算"会影响"，要重算
+	assert_true(
+		turret.may_be_affected_by(AABB(pivot - Vector3.ONE * 0.5, Vector3.ONE)),
+		"转点旁边的零件算受影响"
+	)
+	# 离得很远的零件：不算，别白重算
+	assert_true(
+		not turret.may_be_affected_by(AABB(pivot + Vector3(40, 0, 0), Vector3.ONE)),
+		"40 格外的零件不影响这台转塔"
+	)
+	# 刚好在半径外的也要判 false
+	assert_true(
+		not turret.may_be_affected_by(
+			AABB(pivot + Vector3(radius + 3.0, 0, 0), Vector3.ONE)
+		),
+		"半径外的零件不影响"
+	)
+	turret.free()
+
+## 命中过滤器：打到的零件"已经不存在"时返回 false（子弹要穿过去，不能虚空挡伤害）。
+func test_hit_filter_passes_through_dead_parts() -> void:
+	var shots := Projectiles.new()
+	# 没有过滤器：任何命中都算真命中（保持原来的行为）
+	assert_true(shots._hit_is_real({"collider": null}), "没有过滤器时一律当真命中")
+	# 过滤器说"这块零件没了" -> 不算真命中
+	shots.hit_filter = func(_rid: RID, _shape: int, _pos: Vector3) -> bool:
+		return false
+	assert_true(not shots._hit_is_real({"collider": null}), "过滤器返回 false 时不算真命中")
+	# 过滤器说"活的" -> 正常结算
+	shots.hit_filter = func(_rid: RID, _shape: int, _pos: Vector3) -> bool:
+		return true
+	assert_true(shots._hit_is_real({"collider": null}), "过滤器返回 true 时正常结算")
+	shots.free()

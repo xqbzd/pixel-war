@@ -1,4 +1,4 @@
-@tool
+﻿@tool
 extends Control
 
 ## 主界面（车库）：
@@ -13,6 +13,7 @@ const PART_DIR := "res://data/parts"
 const VEHICLE_DIR := "res://data/vehicles"
 const BUILD_MODE_SCENE := "res://scenes/build_mode.tscn"
 const TEST_FIELD_SCENE := "res://scenes/test_field.tscn"
+const BATTLE_SETUP_SCENE := "res://scenes/battle_setup.tscn"
 const GameSettings := preload("res://scripts/game_settings.gd")
 const TOP_BAR_HEIGHT := 52.0
 
@@ -33,10 +34,6 @@ const PANELS := {
 	"codex": {
 		"title": "部件百科",
 		"body": "这一页暂时留空。\n\n按计划直接读 data/parts，展示每个部件的形状、尺寸、渲染路线与成本。",
-	},
-	"battle": {
-		"title": "进入战斗",
-		"body": "这一页暂时留空。\n\n按计划放：匹配、房间、载具确认，然后进战斗场景。",
 	},
 }
 
@@ -76,7 +73,7 @@ func _ready() -> void:
 	_library.load_all(PART_DIR)
 	for warning in _library.warnings:
 		push_warning("part: %s" % warning)
-	_vehicles = VehicleDef.load_all(VEHICLE_DIR)
+	_vehicles = VehicleStore.load_all()
 	for vehicle in _vehicles:
 		for warning in vehicle.warnings:
 			push_warning("vehicle[%s]: %s" % [vehicle.id, warning])
@@ -89,7 +86,11 @@ func _ready() -> void:
 	if _vehicles.is_empty():
 		_update_info()
 	else:
-		select_vehicle(_vehicles[0].id)
+		# 记住上次选的机库：切场景 / 退出重进都回到那一台；
+		# 记录的 id 已经不存在（车被删了）才退回列表第一台。
+		var remembered := GameSettings.selected_vehicle()
+		if remembered.is_empty() or not select_vehicle(remembered):
+			select_vehicle(_vehicles[0].id)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -136,6 +137,8 @@ func select_vehicle(id: String) -> bool:
 	_last_stats = _viewer.show_vehicle(vehicle, _library)
 	_update_info()
 	_refresh_vehicle_list()
+	# 记住这台：下次进主界面（切场景回来 / 退出重进）还选它
+	GameSettings.set_selected_vehicle(vehicle.id)
 	return true
 
 
@@ -329,6 +332,11 @@ func _on_toolbar_pressed(id: String) -> void:
 		var vehicle := _find_vehicle(_current_id)
 		_enter_test_field(_current_id, vehicle.display_name if vehicle != null else "")
 		return
+	if id == "battle":
+		# 人机对战 5v5：用"当前预览的这辆车"当玩家座驾
+		var vehicle := _find_vehicle(_current_id)
+		_enter_battle(_current_id, vehicle.display_name if vehicle != null else "")
+		return
 	open_panel(id)
 
 
@@ -422,6 +430,20 @@ func _enter_test_field(id: String, display_name: String) -> void:
 	get_tree().change_scene_to_file(TEST_FIELD_SCENE)
 
 
+## 进"进入战斗"：先开**配置界面**（选模式 / 自定义房间 / 排两队 5 格），
+## 在那边点"开始游戏"才真的切到对战场景（见 scripts/battle_setup.gd）。
+func _enter_battle(id: String, display_name: String) -> void:
+	if Engine.is_editor_hint():
+		return
+	if id.is_empty():
+		open_panel("vehicles")
+		return
+	# 玩家用"当前预览的这辆车"；配置界面拿它填玩家那一格
+	TestField.pending_vehicle = {"id": id, "name": display_name}
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	get_tree().change_scene_to_file(BATTLE_SETUP_SCENE)
+
+
 func _on_rename_pressed(id: String) -> void:
 	var vehicle := _find_vehicle(id)
 	if vehicle == null:
@@ -435,8 +457,8 @@ func _on_delete_pressed(id: String) -> void:
 		return
 	_open_confirm_dialog(
 		"删除载具",
-		"确定删除「%s」吗？\n\n文件会被真的删除，不进回收站。\n%s/%s.vehicle.txt" % [
-			vehicle.display_name, VEHICLE_DIR, id
+		"确定删除「%s」吗？\n\n文件会被真的删除，不进回收站。\n%s" % [
+			vehicle.display_name, VehicleStore.find_path(id)
 		],
 		id
 	)
@@ -446,19 +468,20 @@ func _do_rename(id: String, new_name: String) -> void:
 	var text := new_name.strip_edges()
 	if text.is_empty():
 		return
-	if VehicleDef.rename_file("%s/%s.vehicle.txt" % [VEHICLE_DIR, id], text):
+	if VehicleStore.rename(id, text):
 		_reload_vehicles()
+	else:
+		_info.text = "改名失败：%s" % id
 
 
 func _do_delete(id: String) -> void:
-	var path := "%s/%s.vehicle.txt" % [VEHICLE_DIR, id]
-	if FileAccess.file_exists(path):
-		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	if not VehicleStore.delete(id):
+		_info.text = "删不掉：%s（工程自带的车在导出版里是只读的）" % id
 	_reload_vehicles()
 
 
 func _reload_vehicles() -> void:
-	_vehicles = VehicleDef.load_all(VEHICLE_DIR)
+	_vehicles = VehicleStore.load_all()
 	if _find_vehicle(_current_id) == null:
 		if _vehicles.is_empty():
 			_current_id = ""
@@ -581,7 +604,7 @@ func _update_info() -> void:
 		return
 	var vehicle := _find_vehicle(_current_id)
 	if vehicle == null:
-		_info.text = "没有可用载具 —— 在 %s 里放一个 *.vehicle.txt" % VEHICLE_DIR
+		_info.text = "没有可用载具 —— 在 %s 里放一个 *.vehicle.txt" % VehicleStore.write_dir()
 		return
 	_info.text = "%s · %d 个部件 · %d cube · %d tri · %d 个批次" % [
 		vehicle.display_name,

@@ -314,6 +314,18 @@ static func cell_transform(def: PartDef, cell: Vector3i, basis: Basis) -> Transf
 	return Transform3D(clean, Vector3(cell) - rotated_aabb_min(clean, def.cubes))
 
 
+## 把一组本地半空间搬到**摆放后**的坐标系（旋转 + 平移，和 `cell_transform()` 一致）。
+## 本地平面 (n, d) 表示 `n · p ≤ d`；摆放后 `p_w = basis · p_l + origin`，代入得
+## 新平面 `(basis · n, d + (basis · n) · origin)`。法线取单位长度，这样 `d` 的余量就是"格"。
+static func transform_planes(planes: Array, placement: Transform3D) -> Array:
+	var out := []
+	for item in planes:
+		var plane: Plane = item
+		var normal := (placement.basis * plane.normal).normalized()
+		out.append(Plane(normal, plane.d + normal.dot(placement.origin)))
+	return out
+
+
 ## 由摆放变换反推零件占据的起始格子。
 static func origin_cell_of(def: PartDef, basis: Basis, transform: Transform3D) -> Vector3i:
 	var clean := snap_basis(basis)
@@ -362,7 +374,9 @@ func _body_anchor_local(def: PartDef) -> Vector3:
 ## 的对称面不平行于坐标轴，对折之后形状变了 —— 但那也没关系：它们的对折结果可以用一个
 ## **轴对齐旋转**（立方体 24 个旋转里的一个）复原，`mirror_fold_rotation()` 负责把它找出来。
 ## 于是镜像摆放永远是一个正常的「旋转 + 平移」（行列式 +1，存档的 yaw/pitch/roll 记得下），
-## 不需要左手系副本；只有真正**手性**（24 个旋转都还原不出镜像）的零件才会被拒绝。
+## 不需要左手系副本。
+## ⚠️ 镜像性**不由代码判定**（2026-10-15 用户要求）：找不到严格对折时按单位阵处理，
+## 零件照样能镜像（"放得下就放"）；将来真加非对称零件，由用户单独说明再处理。
 const MIRROR_HALF_MIN := -64  # 场地 z ∈ [-32, 32]，半格为单位
 const MIRROR_HALF_MAX := 64
 ## z 取反的反射矩阵 S（绕 z = 0 平面镜像）
@@ -395,12 +409,17 @@ static func cube_rotations() -> Array:
 ##
 ## 左右轴对称的零件 A = 单位阵；两个角块（corner_tetra / corner_cut）的对称面
 ## 不平行于坐标轴（x+y+z ≤ 15 这种对角切面），但对折结果正好是"绕 x 轴转 -90 度"，
-## 所以照样能用同一份模型摆出镜像。**手性**零件（24 个旋转都还原不出来）才返回 ok=false，
-## 那才真的需要一份左手系副本。
+## 所以照样能用同一份模型摆出镜像 —— 这里找的就是那个旋转。
+##
+## ⚠️ **这里不判定"零件能不能镜像"**（2026-10-15 用户要求）：镜像性由人判断，
+## 全部零件都当对称处理，找不到严格对折就按单位阵走，返回值永远是 `ok = true`。
+## 分析只用来①给角块那种"对称面不平行于坐标轴"的零件找旋转、②把"对不上几个格子"
+## 报在 `mismatch` 里给界面/工具看（0 = 严格对称）。真遇到非对称零件，用户会单独说明，
+## 那时再按说明处理（比如另做一份左手系模型），而不是让代码去猜。
 ## 结果按零件缓存（set_defs() 会清空），每个零件只找一次。
 func mirror_fold_rotation(def: PartDef) -> Dictionary:
 	if def == null:
-		return {}
+		return {"ok": true, "basis": Basis(), "mismatch": 0, "found": false}
 	if _mirror_fold.has(def.id):
 		return _mirror_fold[def.id]
 	var result := _find_mirror_fold_rotation(def)
@@ -429,27 +448,37 @@ func _find_mirror_fold_rotation(def: PartDef) -> Dictionary:
 	for corner: Vector3i in centers.keys():
 		folded[Vector3i(corner.x, corner.y, span - corner.z)] = true
 	var centre := Vector3(def.cubes) * 16.0
+	# 24 个轴对齐旋转里挑"对不上格子最少"的那个：严格对称是 0（这时才采用它的旋转）
+	var best_basis := Basis()
+	var best_mismatch := 1 << 30
 	for rotation: Basis in cube_rotations():
-		if _rotation_reproduces_fold(centers, folded, rotation, centre):
-			return {"ok": true, "basis": rotation}
-	return {"ok": false, "basis": Basis()}
+		var mismatch := _fold_mismatch(centers, folded, rotation, centre)
+		if mismatch < best_mismatch:
+			best_mismatch = mismatch
+			best_basis = rotation
+			if mismatch == 0:
+				break
+	if best_mismatch != 0:
+		# 不是严格对称：按单位阵处理（**不拒绝**，镜像性由人判断）
+		best_basis = Basis()
+	return {
+		"ok": true,
+		"basis": best_basis,
+		"mismatch": best_mismatch,
+		"found": best_mismatch == 0,
+	}
 
 
-func _rotation_reproduces_fold(
+## 这个旋转把"对折后的形状"复原得像不像：返回**对不上的格子数**（0 = 逐体素完全对称）。
+func _fold_mismatch(
 	centers: Dictionary, folded: Dictionary, rotation: Basis, centre: Vector3
-) -> bool:
-	if centers.size() != folded.size():
-		return false
+) -> int:
+	var mismatch := 0
 	for corner: Vector3i in centers.keys():
 		var turned: Vector3 = rotation * (Vector3(corner) - centre) + centre
 		if not folded.has(Vector3i(roundi(turned.x), roundi(turned.y), roundi(turned.z))):
-			return false
-	return true
-
-
-## 这个零件能不能镜像（能不能用同一份模型摆出它的镜像）。
-func part_is_mirror_safe(part_id: String) -> bool:
-	return bool(mirror_fold_rotation(_defs_cache.get(part_id)).get("ok", false))
+			mismatch += 1
+	return mismatch
 
 
 ## 单格（1 x 1 x 1）镜像后的格子：格 [z, z+1] 映到 [2mz - z - 1, 2mz - z]。
@@ -470,7 +499,8 @@ static func mirror_cell(cell: Vector3i, mirror_half: int) -> Vector3i:
 ##   这一项就是它的平移部分（A = 单位阵时 a = 0，公式退化成老样子）。
 ##   所以镜像摆放 = 「转 B'·A」+「平移 S·t + 2mz·ẑ - L·(B'·ẑ) + B'·a」—— 仍是正常的旋转/平移
 ##   （行列式 +1，存档的 yaw/pitch/roll 记得下），落子 / 碰撞 / 射线全部复用同一套代码。
-## 左右轴对称的零件 A = 单位阵，公式退化成老样子；手性零件没有 A，返回 {}（界面据此拒绝）。
+## 左右轴对称的零件 A = 单位阵，公式退化成老样子。
+## （非对称零件也照样算：A 按单位阵处理，结果"放得下就放"，但不再是逐体素的真镜像。）
 func mirror_placement(
 	def: PartDef, cell: Vector3i, basis: Basis, mirror_half: int
 ) -> Dictionary:
@@ -935,21 +965,10 @@ func plan(def: PartDef, hit: Dictionary, roll: int, include_invalid := false) ->
 ##   * 镜像体的检查用 can_place() 的全套判据，并且**只有本体真的要落子时**才把本体算进去
 ##     （算进干涉 / 点数预算）—— 本体自己都放不下时，镜像体不该被它牵连；
 ##   * 点数只够一件时：本体先算，所以是"只放本体、不放镜像体"（用户点名要的行为）。
+##   * 镜像性**不在这里判定**：任何零件都出候选（见 mirror_fold_rotation 的说明）。
 func plan_mirror(
 	def: PartDef, hit: Dictionary, roll: int, mirror_half: int, include_invalid := false
 ) -> Dictionary:
-	if def != null and not part_is_mirror_safe(def.id):
-		# 手性零件：镜像体没法用同一份模型拼出来（真需要左手系副本），
-		# 镜像模式对它直接不给候选，理由写在 reason 里给界面显示。
-		return {
-			"valid": false,
-			"reason": (
-				"「%s」是手性零件：24 个轴对齐旋转都还原不出它的镜像，镜像建造需要左手系副本"
-				% def.display_name.split(" / ")[0]
-			),
-			"body": {},
-			"mirror": {},
-		}
 	var body := plan(def, hit, roll, true)
 	if body.is_empty():
 		return {}
@@ -1365,7 +1384,7 @@ func _is_full_cube_part(part_id: String) -> bool:
 	var full := (
 		volume != null
 		and volume.solid_count() == volume.data.size()
-		and (def == null or def.wheel_body.is_empty())
+		and (def == null or not def.is_wheel())
 	)
 	_full_cube[part_id] = full
 	return full

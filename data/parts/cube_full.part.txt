@@ -6,6 +6,7 @@
 
 name = 立方体块 / Cube Block
 
+category  = 结构        # 零件菜单里的分页：结构 / 行驶 / 武器 / 辅助 / 特殊
 shape     = cube        # cube | half_prism_xz | half_prism_xy | half_prism_yz
 cubes     = 1 1 1       # 部件占地（单位 = cube）；每个 cube = 16^3 体素
 render    = texture     # texture（六面贴图，适合数量巨大的方块）| voxel（体素网格）

@@ -8,6 +8,7 @@
 
 name = 核心（2x2） / Core (2x2)
 
+category  = 特殊        # 一台机器人只有一个的核心：放在"特殊"页
 shape     = cube
 cubes     = 2 2 1
 render    = texture
@@ -25,5 +26,5 @@ edge_band = 1
 
 # 基本数值（先按默认填，等手动调）
 weight    = 30
-hp        = 30000
+hp        = 15000
 pp        = 0

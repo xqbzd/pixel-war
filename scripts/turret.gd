@@ -31,13 +31,27 @@ var pitch_min_deg := -5.0
 var pitch_max_deg := 35.0
 var traverse_speed_deg := 60.0   # 炮塔最高转速（度/秒），水平、俯仰共用
 ## 开火参数（都在部件文件里，速度已从 m/s 换算成格/秒）
-var projectile := "bullet"       # 射弹类型（目前只有 bullet）
+var projectile := "bullet"       # 射弹类型：bullet（点状弹丸）/ ray（瞬间命中的射线）
+## 射线类武器的最大射程（格）；普通子弹用 `projectile_life × 弹速` 就够了，不看这个。
+var ray_range := 800.0
 var muzzle_speed := 0.0          # 子弹初速度（格/秒）
 var damage := 0.0
 var spread_deg := 0.0
 var energy_cost := 0.0
 var projectile_life := 8.0       # 弹丸寿命（秒），见部件文件的 weapon_projectile_life
 var fire_interval := INF         # 两发之间的秒数（rpm 换算），INF = 不能开火
+## 枪声音高倍率（部件文件的 `weapon_pitch`）：< 1 更低沉。重机枪就是靠它和轻机枪区分。
+var weapon_pitch := 1.0
+## ── 弹头（普通子弹）的参数：从部件文件抄下来，开火时交给 Projectiles ──────────
+## 后坐冲量（kg·格/秒）：测试场每发把它作用在**枪口**上，把车往后推（见 `TestField._update_weapons`）。
+## 这里只存值；施力在测试场（它才知道车体）。
+var recoil_impulse := 0.0
+## 冲击冲量（kg·格/秒）：命中刚体时把对方推一下（见 `Projectiles._push_target`）。
+var impact_impulse := 0.0
+## 弹头颜色：曳光轨迹 + 弹着点火花（默认 = 现在的黄色）。
+var bullet_color := PartDef.DEFAULT_BULLET_COLOR
+## 距离衰减：每飞 100 米损失的伤害比例（0 = 不衰减）。
+var damage_falloff := 0.0
 ## 子弹从**枪口沿枪轴再外推**多少格生成：枪口正好贴在模型的面上，
 ## 不外推的话第一段射线会立刻打到自己车体的碰撞盒（用户定的"沿轴线向正方向补一格"）。
 ## ⚠️ 2026-10-14 从 1.0 收到 0.05：那 1 格是**射线完全覆盖不到的死区**（子弹的连续检测
@@ -106,7 +120,13 @@ func setup(def: PartDef, place: Transform3D, library: PartLibrary) -> String:
 	spread_deg = def.weapon_spread
 	energy_cost = def.weapon_energy_cost
 	projectile_life = def.weapon_projectile_life
+	ray_range = def.ray_range_cubes()
 	fire_interval = def.fire_interval_seconds()
+	weapon_pitch = def.weapon_pitch
+	recoil_impulse = def.weapon_recoil_impulse
+	impact_impulse = def.weapon_impact_impulse
+	bullet_color = def.weapon_bullet_color
+	damage_falloff = def.weapon_damage_falloff
 	name = "Turret_%s" % def.id
 	transform = place
 	var axis_info := def.weapon_barrel_axis()
@@ -250,6 +270,46 @@ func arc_free_ratio() -> float:
 	return float(open) / float(_arc_reach.size())
 
 
+## 转点的位置（**车体本地坐标**）：射界"按需重算"用它判断"这个零件离得够不够近"。
+func pivot_point() -> Vector3:
+	return transform * _pivot
+
+
+## 射界的影响范围 = **枪管扇形**：以转点为圆心、枪管长度（转点 → 枪口）为半径，
+## 再排除掉落在水平射界（`weapon_yaw_limit`）之外的零件 —— 和 `rebuild_arc()` 的预筛同一套口径，
+## 不再额外加余量（用户 2026-10-19 的要求：加 2 格余量太松，白触发一堆重算）。
+func arc_influence_radius() -> float:
+	if not _ready_ok:
+		return 0.0
+	return _gun_reach()
+
+
+## 一个零件盒（**车体本地坐标**）会不会影响这个转塔的射界。
+## 保守：转塔没装好时返回 true（让它照常重算，别把坏掉的转塔永久锁住）。
+func may_be_affected_by(box: AABB) -> bool:
+	if not _ready_ok:
+		return true
+	var radius := arc_influence_radius()
+	if radius <= 0.0:
+		return true
+	var pivot: Vector3 = transform * _pivot
+	# 和 `rebuild_arc()` 的预筛**同一套口径**（盒子中心 + 半对角线），保证不会漏掉
+	# "真的会挡枪管"的零件 —— 漏了就永远不重算，射界会一直是旧的
+	if box.get_center().distance_to(pivot) > radius + box.size.length() * 0.5 + 0.1:
+		return false
+	var closest := pivot.clamp(box.position, box.end)
+	var offset := closest - pivot
+	# 扇形：只关心水平射界范围内的零件（360° 的转塔就是整圈）
+	if yaw_limit_deg >= 359.0:
+		return true
+	var forward: Vector3 = transform.basis * _barrel_dir
+	var flat_forward := Vector3(forward.x, 0.0, forward.z)
+	var flat_offset := Vector3(offset.x, 0.0, offset.z)
+	if flat_forward.length() < 0.001 or flat_offset.length() < 0.001:
+		return true
+	return rad_to_deg(flat_forward.angle_to(flat_offset)) <= yaw_limit_deg * 0.5
+
+
 ## 当前朝向为什么不能在真实射界里（HUD 用）：挡住它的零件名，或"" 
 func arc_reason() -> String:
 	if not _arc_ready:
@@ -304,6 +364,10 @@ func _gun_reach() -> float:
 static func segment_blocker(
 	from: Vector3, to: Vector3, part_boxes: Array, skip_index := -1, pad := 0.0
 ) -> String:
+	# 先用**线段自己的包围盒**做粗筛：一个盒子和这条线段不相交，就绝不可能被线段穿过，
+	# 省掉逐盒 6 面剪切的 `intersects_segment`。判据是必要条件，所以结果和逐个精确测**完全一致**。
+	# `pad` 也要算进去（精确测用的是 `box.grow(pad)`）。拆开写是为了不分配 `grow` 的临时盒子。
+	var span := AABB(from, Vector3.ZERO).expand(to).grow(maxf(pad, 0.0) + 0.001)
 	for i in part_boxes.size():
 		if i == skip_index:
 			continue
@@ -311,10 +375,46 @@ static func segment_blocker(
 		var box: AABB = entry.get("box", AABB())
 		if box.size.x <= 0.001 or box.size.y <= 0.001 or box.size.z <= 0.001:
 			continue
+		if not box.intersects(span):
+			continue
+		# 有凸包半空间就按**真实形状**测（半砖是三角柱，角块是四面体/切角块）；
+		# 没有就退回 AABB（老数据 / 手搓的测试数据）。
+		var planes: Variant = entry.get("planes", null)
+		if planes is Array and not (planes as Array).is_empty():
+			if _segment_hits_convex(from, to, planes as Array, pad):
+				return str(entry.get("name", "零件 %d" % i))
+			continue
 		var probe := box.grow(pad) if pad > 0.0 else box
 		if probe.intersects_segment(from, to):
 			return str(entry.get("name", "零件 %d" % i))
 	return ""
+
+
+## 线段有没有穿进这组半空间围成的**凸体**（法线已归一化，`d` 的正方向是"往外"）。
+## 标准区间裁剪：对每个平面求 f(t) = n·p(t) - d 从正变负的区间，取交集。
+static func _segment_hits_convex(
+	from: Vector3, to: Vector3, planes: Array, pad := 0.0
+) -> bool:
+	var direction := to - from
+	var t_min := 0.0
+	var t_max := 1.0
+	for item in planes:
+		var plane: Plane = item
+		var offset := plane.d + pad          # 余量 = 把平面整体往外推 pad 格
+		var num := plane.normal.dot(from) - offset
+		var den := plane.normal.dot(direction)
+		if absf(den) < 0.000001:
+			if num > 0.0:
+				return false                 # 整条线都在这面外侧
+			continue
+		var t := -num / den
+		if den > 0.0:
+			t_max = minf(t_max, t)
+		else:
+			t_min = maxf(t_min, t)
+		if t_min > t_max:
+			return false
+	return true
 
 
 ## 枪管摆到 (yaw, pitch) 时压到别的零件没有。返回挡住它的零件名（空 = 没压）。
@@ -498,6 +598,23 @@ func ready_shots(delta: float) -> int:
 ## 子弹生成点：枪口沿当前枪轴再外推 `MUZZLE_PAD` 格（见上面的注释）。
 func fire_origin() -> Vector3:
 	return muzzle_position() + barrel_direction() * MUZZLE_PAD
+
+
+## 这一发弹头的参数，直接喂给 `Projectiles.fire()` 的最后一个参数。
+## 后坐冲量**不在**这里：那是施加在自己车身上的力，由测试场做（它才知道车体）。
+func bullet_spec() -> Dictionary:
+	return {
+		"kind": projectile,
+		"range": ray_range,
+		"color": bullet_color,
+		"falloff": damage_falloff,
+		"impact_impulse": impact_impulse,
+	}
+
+
+## 射线类武器？(`weapon_projectile = ray`)：开火是**瞬间命中**，没有弹速/下坠/寿命。
+func is_ray() -> bool:
+	return projectile == "ray"
 
 
 func reset_cooldown() -> void:

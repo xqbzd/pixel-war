@@ -3,7 +3,8 @@ class_name TestField
 
 ## 测试场：把载具按物理摆进一整块现成场地（Truck Town 的城镇 + 赛道模型）里，验证轮子能不能跑。
 ##
-##   - 轮轴（带 `wheel_body` 的部件）→ **自定义轮胎节点**：从轮心朝圆周打 16 条等距射线
+##   - 轮轴（`is_wheel()` 的部件，见 `PartDef.wheel_body_model`）→ **自定义轮胎节点**：
+##     从轮心朝圆周打 16 条等距射线
 ##     （每 22.5° 一条，整圈判定），合并接触后每轮只计算一份弹簧、阻尼和摩擦。
 ##     为什么不用 `VehicleWheel3D`：它每个轮子只有一条竖直射线、不可配，骑台阶/路缘/坡脚时
 ##     "感觉不到"，越野很差（试过一簇多射线 + 视觉去穿透，都不划算，已回滚）。
@@ -16,12 +17,14 @@ class_name TestField
 ##     碰撞直接拿模型网格做 trimesh；整块场地挂在一个根节点下，**缩放根节点就能整体缩放**
 ##     （连碰撞一起缩放）。进游戏按 `[` `]` 现场调，HUD 上显示当前倍数。
 ##   - 出生点：在赛道附近的候选点上竖直探测模型网格，落在最上面的那一片路面上。
-##   - WASD 开车（W/S 油门·反向、A/D 全轮转向），环视相机，ESC 回主界面。
+##   - WASD 开车（W/S 油门·反向、A/D 全轮转向），环视相机，ESC 弹暂停菜单。
 ##     空格**不参与**驾驶（改成开火了），反方向键自动先刹车（见 REVERSE_BRAKE_SPEED_CUBES）。
 
 const MENU_SCENE := "res://scenes/main_menu.tscn"
 const VEHICLE_DIR := "res://data/vehicles"
 const GameSettings := preload("res://scripts/game_settings.gd")
+## 世界音效（距离衰减 + 左右声道）：开火声和所有车的引擎声都用它算
+const SpatialAudio := preload("res://scripts/spatial_audio.gd")
 ## 出生高度（格）：车底离地 0.3 格（0.15 米），让悬挂轻轻落地。
 const SPAWN_HEIGHT := 0.3
 ## 场地：一整块现成模型（Truck Town，MIT）。1 模型单位 ≈ 1 米左右（房子 6~10 单位高）。
@@ -47,12 +50,37 @@ const ARENA_SPAWN_STEPS := 7
 ## HUD 上会显示"车的位置（模型单位）"，把满意的那三个数填到这里即可。
 ## 当前值 = 用户 2026-10-11 选定的位置（那时车停的地方）。
 const ARENA_SPAWN_MODEL := Vector3(-19.42, 5.13, 15.30)
-## 相机：绕"环视中心"（见 CAMERA_CENTER_CLEARANCE）自由环视，滚轮变焦，不自动回正。
-## 中心抬到车上 10 米之后，8 米的距离会把车挤出画面，所以默认距离跟着放大
+## 相机：绕"环视中心"（见 CAMERA_CENTER_CLEARANCE）自由环视，不自动回正。
+## **镜头远近是固定的**（CAMERA_DISTANCE）—— 滚轮调的是**视野 FOV**，不是远近：
+## 调 FOV 时车在画面里会变大变小、但相机和车之间的距离不变（视角中心也不动）。
+## 中心抬到车上 10 米之后，8 米的距离会把车挤出画面，所以距离取大一点
 ## （70° FOV 下 28 米时，车大约落在画面下缘往上一点）。
 const CAMERA_DISTANCE := 28.0
-const CAMERA_MIN_DISTANCE := 5.0
-const CAMERA_MAX_DISTANCE := 90.0
+## 相机被墙/掩体挤到最近时也不小于这个距离（格）。
+## ⚠️ 太小会让 `look_at` 的方向变成零向量 → 相机朝瞬间失效（画面闪一下另一个视角），
+## 而且会钻进车里看见内壁。8 格 = 4 米，比车身还长，稳定。
+const CAMERA_MIN_DISTANCE := 8.0
+## 单帧鼠标事件的 relative 上限（像素）：超过就当"系统跳变"忽略，见 `_unhandled_input()`
+const MOUSE_MAX_DELTA := 220.0
+## 腰射（不按右键）的视野：滚轮在 FOV_MIN ~ FOV_MAX 之间调，每格 ±FOV_STEP 度。
+## 2026-10-18 用户要求："拉远的最大 FOV 太远了"——只改上限：最窄 30° 不动，
+## 可调行程从 70° 缩到 23°（约 1/3），默认视野 = 上限 53°（滚轮只能往里收）。
+const CAMERA_FOV := 53.0
+const CAMERA_FOV_MIN := 30.0
+const CAMERA_FOV_MAX := 53.0
+const CAMERA_FOV_STEP := 2.5
+## 视野变化速度（度/秒）：0 = 瞬间到位。默认 70→4 度约 0.12 秒，
+## 这样**按住右键是"刷"地推近**、松开是"刷"地拉回，而不是咔一下跳（会晕）。
+const CAMERA_FOV_SPEED := 540.0
+## 右键按住 = 开镜（动作名，见 `ensure_actions()`；走 InputMap 是为了无头测试也能按）。
+## 开镜后的视野 = 腰射视野 ÷ 倍率（2 倍镜 = 视野减半），滚轮改的是**倍率**。
+## 倍率在**这一场**里记住：松开右键不清零，下次按下去还是上次那个倍数。
+const SCOPE_ACTION := "aim_scope"
+const SCOPE_ZOOM_MIN := 2.0
+const SCOPE_ZOOM_MAX := 16.0
+## 每格滚轮的倍率变化（乘法）：2→2.5→3.1→…→16 一共 10 格，各倍率下手感一致。
+const SCOPE_ZOOM_STEP := 1.25
+const SCOPE_ZOOM_DEFAULT := 2.0
 const CAMERA_MIN_PITCH := -70.0
 const CAMERA_MAX_PITCH := 65.0
 ## 环视（瞄准）中心：x/z 取载具**重心**，y 取"整车最高点 + 这个高度"（单位 = 格）。
@@ -79,6 +107,9 @@ const DRIVE_ACTIONS := {
 ## 开火动作：左键 / 空格都能按（枪是持续开火，松手才停；射速由部件文件的 rpm 管）。
 const FIRE_KEY := KEY_SPACE
 const FIRE_ACTION := "fire_weapon"
+## 标记敌人（对战模式：准星对准敌人按 Q —— 见 `BattleMode._try_mark_target()`）
+const MARK_KEY := KEY_Q
+const MARK_ACTION := "mark_target"
 ## 反向键当刹车用的速度门槛（**格/秒** —— 下面比的是 `forward_speed`，它是内部单位格/秒；
 ## 名字里的单位别省，标成 m/s 会看错 1/CUBE_METERS 倍。0.6 格/秒 = 0.3 m/s）
 const REVERSE_BRAKE_SPEED_CUBES := 0.6
@@ -93,11 +124,21 @@ const STOP_GRIP_SPEED := 1.0
 const TIRE_SPIN_MAX := TAU * 2.5        # 视觉上限（圈/秒）：真车 15 m/s 也就 2.4 圈/秒
 const TIRE_SPIN_INDICATE := TAU * 0.6   # 正在输出时额外给 0.6 圈/秒，做方向指示
 
+## ── 队伍 / 碰撞层 ──────────────────────────────────────────────────────────
+## 地形 = 1；两台车按**队伍**分层（2 = 我方、3 = 敌方）。这样"谁能撞谁"只看层，
+## 而敌我判定走 `VehicleRig.team`（不看层）—— 人类玩家 / 人机队友 / 人机敌人都是同一套代码。
+const TEAM_PLAYER := 0
+const TEAM_ENEMY := 1
+const WORLD_LAYER := 1
+const TEAM_LAYER_PLAYER := 2
+const TEAM_LAYER_ENEMY := 3
+const TEAM_LAYERS := [TEAM_LAYER_PLAYER, TEAM_LAYER_ENEMY]
+
 ## ── 武器（转塔）──────────────────────────────────────────────────────────
 ## 瞄点 = 从**相机沿准星（屏幕中心）**打一条射线，取与"敌人或地形"的**首个交点**；
 ## 打不到（对着天）就用射线远端。转塔再朝这个点转（见 scripts/turret.gd）。
-## 碰撞层：1 = 场地/世界，2 = 预留给敌人（以后敌人放这一层就会被瞄准，不用改代码）。
-const AIM_LAYERS := 1 | 2 | HITBOX_LAYER
+## 碰撞层：1 = 场地、2 = 我方车体、3 = 敌方车体（子弹/准星都能认，不用改代码）。
+const AIM_LAYERS := WORLD_LAYER | TEAM_LAYER_PLAYER | TEAM_LAYER_ENEMY | HITBOX_LAYER
 ## 射线长度（格）：射线本身是无限长的，这里只是"打不到东西时瞄哪儿"的近似远端。
 ## 要够长 —— 靶子摆在**测试场外圈**（离城镇中心 135 模型单位 = 675 格），
 ## 准星得能瞄到它们（600 格会半路打在地面上，转塔就一直对着近处的地）。
@@ -107,8 +148,8 @@ const AIM_MARKER_RADIUS := 0.12
 ## 重心显示（按 O 开关）：球 + 一条垂到地面的线 + 地面上的投影点。
 ## 调驾驶手感时最该看的两个数就是"重心多高、在前后轴之间偏哪儿"。
 ## 具体形状在 `scripts/com_marker.gd`（建造界面共用同一个）。
-## 敌方（靶子）碰撞层：`AIM_LAYERS` 已经包含它，所以准星和子弹都会认。
-const ENEMY_LAYER := 2
+## 敌方（靶子）碰撞层：和"对战模式里的敌人"同一层，`AIM_LAYERS` 已经包含它。
+const ENEMY_LAYER := TEAM_LAYER_ENEMY
 ## 射弹专用层（轮胎那类"只给子弹看"的受击盒，见 `VehicleRig.HITBOX_LAYER`）：
 ## 加进 `AIM_LAYERS` 之后，子弹和准星射线能打到轮胎，但车/地形谁都不会和它碰撞。
 const HITBOX_LAYER := VehicleRig.HITBOX_LAYER
@@ -131,10 +172,12 @@ const ENEMY_SPAWN_LIFT := 1.5
 ## 于是能被顶开/爬上去 —— 原生 VehicleWheel3D 只有一条向下的射线，这些全都感觉不到。
 ##
 ## ⚠️ 下面这一整组常量现在只是**默认值**：真正调参请改
-## `data/parts/wheel2x2/wheel_axle_2x2.part.txt`（键名 = `wheel_` + 这里的小写名，
+## `data/parts/toywheel2x2/toy_wheel_2x2.part.txt`（键名 = `wheel_` + 这里的小写名，
 ## 见 `PartDef` 的"自定义整圈射线轮胎的手感旋钮"一段），测试场按**部件文件**里的值跑。
 ## 这里改只影响"没写那一行的轮轴"。
-const WHEEL_RAYS := 16   # 0 = 纯单射线模式（只留悬挂那条射线 = 最早的单射线手感）
+const WHEEL_RAYS := 8    # 0 = 纯单射线模式（只留悬挂那条射线 = 最早的单射线手感）
+## 人机 / 靶子每个轮子的整圈射线数（玩家用 `WHEEL_RAYS`）：10 台车一起跑时这是最贵的一项
+const BOT_WHEEL_RAYS := 0
 ## 射线长度 = 半径 + 这个余量（提前一点点发现台阶边缘）
 const WHEEL_RAY_SLACK := 0.04
 ## 摩擦：先按"速度 × 增益"算目标力，再按 mu × 法向力截断（近似静摩擦，超了就滑）
@@ -215,14 +258,18 @@ static var pending_vehicle := {}
 var _library := PartLibrary.new()
 var _chassis: RigidBody3D
 var _wheels := []          # [{node: Node3D, radius, stiffness, ...}] —— 见 _add_wheel()
-var _turrets := []         # [Turret] —— 每个转塔零件一个（见 scripts/turret.gd）
+var _turrets := []         # [Turret] —— 玩家车的转塔（= `_player_veh["turrets"]` 本身）
 var _player_rig: VehicleRig # 玩家车的车体（零件血量 / 碰撞盒 / 分组视觉）
-var _enemies := []         # [VehicleRig] —— 场地里的靶子：**我方载具的复制品**
-## 每台车一条：{rig, chassis, wheels, is_player}。轮胎物理对所有车一视同仁 ——
-## 玩家车读键盘输入，靶子输入恒为 0（所以它们只是"站得住、推得动"的完整刚体）。
-## （`_wheels` 就是玩家那条 `wheels` 数组本身，camera/瞄准/工具都还认它。）
+var _enemies := []         # [VehicleRig] —— 测试场的靶子 / 对战模式里的敌方
+## 每台车一条：{rig, chassis, wheels, turrets, is_player, team, owner_key, centre, ...}。
+## 轮胎物理对所有车一视同仁 —— 玩家车读键盘输入，人机由子类（对战模式）喂输入，
+## 测试场的靶子输入恒为 0（所以它们只是"站得住、推得动"的完整刚体）。
+## （`_wheels` / `_turrets` / `_clip_boxes` 就是玩家那条记录的数组本身，camera/HUD 还认它们。）
 var _vehicles := []
+var _player_veh := {}      # `_vehicles` 里玩家那一条（对战模式要按队伍统计，靠它认人）
 var _vehicles_by_rid := {} # RID -> VehicleRig（子弹打中谁，靠它反查）
+## 开火者键 -> 队伍：友军伤害判定用（`owner_key` 见 `_spawn_vehicle()`）。
+var _team_of_key := {}
 var _kills := 0            # 被彻底打光的靶子数
 var _last_hit := ""        # 最近一次命中的结算文字（HUD 上显示）
 var _projectiles: Projectiles     # 射弹管理（挂在场地根上，子弹不跟车走）
@@ -266,7 +313,12 @@ var _render_info := ""
 var _built := false
 var _camera_yaw := 0.0     # 相对车头的水平偏移（度）
 var _camera_pitch := -12.0 # 俯仰（度），正数向上
-var _camera_distance := CAMERA_DISTANCE
+## 镜头视野（度）：腰射时滚轮直接改它；开镜时按倍率换算，见 `target_fov()`。
+var _fov := CAMERA_FOV
+## 开镜倍率（2~16）：滚轮在开镜时改它 —— **收镜不清零**，单场内一直记着。
+var _scope_zoom := SCOPE_ZOOM_DEFAULT
+## 右键是不是按住（每帧从 InputMap 同步，见 `_process`）。
+var _scoped := false
 ## 镜头是否**跟着车头转**（设置里的开关，见 GameSettings.camera_follow）：
 ## 两种模式下鼠标都能自由环视，区别只在"鼠标转的是哪种角度"：
 ##   开 = `_camera_yaw` 是**相对车头的偏移** → 车一转向，画面跟着转（车头始终在正前方）；
@@ -274,6 +326,30 @@ var _camera_distance := CAMERA_DISTANCE
 ##        想让车回到画面正前方得自己用鼠标找。
 var _camera_follow := true
 var _crosshair: Control
+## 开镜遮罩（镜筒 + 十字分划 + 右侧倍率滑条），只在开镜时淡入 —— 见 scripts/scope_overlay.gd
+var _scope_overlay: ScopeOverlay
+## ESC 暂停菜单（返回战斗 / 游戏设置 / 自爆 / 返回主界面）—— 测试场和对战共用
+var _pause_menu: PauseMenu
+## 世界音效的声部池（开火声）：10 台车一起开火时能叠，轮着用。
+## 引擎声不走这里 —— 每台车一个长期循环的 3D 声部（存在 veh["audio"]）。
+var _sfx_pool: Array[AudioStreamPlayer3D] = []
+var _sfx_next := 0
+## 引擎音效的调参缓存：`GameSettings.engine_*()` 每次都要读文件字典，10 台车 × 120 Hz 时
+## 光这几组取值就是 1 ms+/tick（实测）—— 进场缓存一次，改完设置重新进一局就生效。
+var _eng_pitch_low := 1.0
+var _eng_pitch_high := 1.6
+var _eng_ramp := 0.35
+var _eng_db_idle := -34.0
+var _eng_db_full := -8.0
+## F1：HUD 上显示"车坐标 / 准星落点"（米）—— 手动摆放场地时照着抄数字用
+var _show_coords := false
+## 零件摧毁时的体素碎片（纯视效；`Debris` = 一个 MultiMesh 装所有碎块）
+var _debris: Debris
+## 这一物理帧攒下来的伤害（`VehicleRig` -> {parts: {零件: 伤害}, point: 命中点, hits: 发数}）
+## 高射速武器不逐发结算，帧末按零件合并（见 `_on_projectile_hit` / `_flush_damage_batches`）
+var _damage_batches := {}
+
+
 
 
 func _ready() -> void:
@@ -284,14 +360,20 @@ func _ready() -> void:
 	_built = true
 	# 测试场里不放大厅那首循环音乐 —— 这里该听的是引擎声和枪声
 	GameSettings.stop_music()
+	# 提前把开火音**加载**进来（只是读盘 + 解码一次）：第一次开枪时再加载会卡一下，
+	# 而"第一次开枪"恰好就是开局交火那一下。
+	GameSettings.shot_stream()
 	ensure_actions()
 	_library.load_all()
 	_collect_render_info()
 	_build_arena()
+	_build_debris()
 	_build_camera()
 	_build_hud()
+	_build_pause_menu()
 	# 镜头跟不跟车头转：设置里的开关（读一次就够 —— 设置界面不在测试场里）
 	_camera_follow = GameSettings.camera_follow()
+	_cache_engine_audio()
 	enter_vehicle(str(pending_vehicle.get("id", "")))
 
 
@@ -331,6 +413,20 @@ static func ensure_actions() -> void:
 		var fire_mouse := InputEventMouseButton.new()
 		fire_mouse.button_index = MOUSE_BUTTON_LEFT
 		InputMap.action_add_event(FIRE_ACTION, fire_mouse)
+	# 开镜：鼠标右键按住（和开火一样走动作，方便无头测试按）
+	if not InputMap.has_action(SCOPE_ACTION):
+		InputMap.add_action(SCOPE_ACTION)
+	if InputMap.action_get_events(SCOPE_ACTION).is_empty():
+		var scope_mouse := InputEventMouseButton.new()
+		scope_mouse.button_index = MOUSE_BUTTON_RIGHT
+		InputMap.action_add_event(SCOPE_ACTION, scope_mouse)
+	# 手动标记：Q（对战模式里准星对准敌人按一下，立刻点亮；测试场里没人可标）
+	if not InputMap.has_action(MARK_ACTION):
+		InputMap.add_action(MARK_ACTION)
+	if InputMap.action_get_events(MARK_ACTION).is_empty():
+		var mark_key := InputEventKey.new()
+		mark_key.keycode = MARK_KEY
+		InputMap.action_add_event(MARK_ACTION, mark_key)
 
 
 ## 把某辆载具摆进测试场。前置条件不满足就只显示原因（不摆车）。
@@ -360,7 +456,7 @@ func enter_vehicle(vehicle_id: String) -> bool:
 		_status = "没有指定载具"
 		_update_hud()
 		return false
-	var path := "%s/%s.vehicle.txt" % [VEHICLE_DIR, vehicle_id]
+	var path := VehicleStore.find_path(vehicle_id)
 	if not FileAccess.file_exists(path):
 		_status = "找不到 %s" % path
 		_update_hud()
@@ -382,7 +478,8 @@ func enter_vehicle(vehicle_id: String) -> bool:
 	_spawn(vehicle)
 	_status = (
 		"开车：W/S 油门·反向（先自动刹车）· A/D 转向 · 空格/左键 开火（打准星瞄点）\n"
-		+ "鼠标环视瞄准 · 滚轮变焦 · [ ] 缩放场地 · O 显示重心 · ESC 回主界面\n"
+		+ "鼠标环视瞄准 · 滚轮调视野 · 右键按住开镜（开镜时滚轮调 2~16 倍）\n"
+		+ "[ ] 缩放场地 · O 显示重心 · ESC 暂停菜单\n"
 		+ "↑↓←→ 推车、< > 升降（找出生点用）"
 	)
 	_update_hud()
@@ -396,81 +493,35 @@ func _spawn(vehicle: VehicleDef) -> void:
 	# 用 `bounds()`（声明 cubes 盒子）会让"车底"算高一截，出生时半个轮胎埋进地里（用户报的）。
 	var actual := vehicle.actual_bounds(_library)
 	_spawn_center = actual.get_center()
-	# 底盘就是个刚体：轮胎的力由我们自己的整圈射线模型算（`_apply_wheel()`），
-	# 不再用 VehicleBody3D + VehicleWheel3D 那套（它每个轮子只有一条竖直射线）。
-	_chassis = RigidBody3D.new()
-	_chassis.name = "Chassis"
-	# 悬挂是每帧自己施力的：刚体一旦睡着就不再受力，车会"僵"在原地 —— 别让它睡
-	_chassis.can_sleep = false
-	# 出生点：在场地模型上竖着探一条线，落在那里最上面的路面/地面上；车头朝 +x
-	_chassis.transform = Transform3D(Basis(), _chassis_spawn_point(actual))
-	print("[测试场] 出生点 %s（场地缩放 ×%.2f）" % [_chassis.transform.origin, _arena_scale])
-	_chassis.center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
-	# 层 1 = 世界/车体（对地形碰撞）；掩码里加上层 2，这样还能撞到当靶子的敌方复制品
-	_chassis.collision_layer = 1
-	_chassis.collision_mask = 1 | ENEMY_LAYER
-	add_child(_chassis)
-
-	# 车体 = VehicleRig：**一个零件一个碰撞盒**（下标 = 零件下标，射线打回来就知道打中了谁）
-	# + 按 (部件, 路线) 分组的视觉。转塔零件在玩家车上由 Turret 节点画，这里跳过。
-	_player_rig = VehicleRig.new()
-	_player_rig.static_skip_weapon = true
-	_player_rig.label_text = "我方"
-	_player_rig.setup(vehicle, _library, _chassis, _chassis, true, -_spawn_center)
-	_cam_box_local = _player_rig.bounds_local()
-	_cam_center_local = _chassis.center_of_mass
-	_clip_boxes = _collect_clip_boxes(_player_rig, vehicle)
-	_vehicles_by_rid[_chassis.get_rid()] = _player_rig
-	if _player_rig.hitboxes != null:
-		# 轮胎那种"只给子弹看"的受击盒是独立 body：也登记到这台车上，
-		# 打中轮胎的伤害照样算在这个轮轴上
-		_vehicles_by_rid[_player_rig.hitboxes.get_rid()] = _player_rig
-	# 转塔零件：网格由 Turret 节点画（支架/枪管要转），带上零件下标（零件被打掉时好清理）
-	var weapon_parts := []
-	for i in vehicle.parts.size():
-		var wdef: PartDef = _library.get_def(str(vehicle.parts[i]["part_id"]))
-		if wdef != null and wdef.weapon == "turret":
-			weapon_parts.append([wdef, i])
-	# 轮子：每个轮轴一个自定义轮胎节点（轮胎网格挂它下面，整圈射线在 _apply_wheel 里算）。
-	# 玩家车也是一条普通 `_vehicles` 记录 —— 靶子走同一套轮胎物理（用户要求"完整物理行为"）。
-	var player_entry := {
-		"rig": _player_rig, "chassis": _chassis, "wheels": [], "is_player": true,
-	}
-	_vehicles.append(player_entry)
-	_wheels = player_entry["wheels"]
-	var specs := vehicle.wheel_specs(_library)
-	_initialize_vehicle_wheels(player_entry, specs)
-	# 武器：每个转塔一个节点组（底座固定 / 支架水平 / 枪管俯仰），每帧朝准星瞄点转
-	for pair in weapon_parts:
-		var wplace := BuildGrid.cell_transform(
-			pair[0], vehicle.parts[pair[1]]["cell"], vehicle.parts[pair[1]]["basis"]
-		)
-		wplace.origin -= _spawn_center
-		var turret := Turret.new()
-		_chassis.add_child(turret)
-		var problem: String = turret.setup(pair[0], wplace, _library)
-		if not problem.is_empty():
-			_turret_problem = "%s：%s" % [str(pair[0].id), problem]
-			push_warning("测试场：转塔 %s —— %s" % [str(pair[0].id), problem])
-		turret.set_meta("part_index", int(pair[1]))
-		_turrets.append(turret)
-	# 瞄点标记（调武器时直接看转塔在瞄哪儿）
-	if not _turrets.is_empty():
-		_build_aim_marker()
-		_refresh_turret_arcs()     # 真实射界：一进场就算一次（零件打掉之后再算）
-	# 能量池 + 射弹管理
-	var core_energy := _core_energy(vehicle)
-	_energy_max = core_energy.x
-	_energy_regen = core_energy.y
-	_energy = _energy_max
+	# 射弹管理先建：车队（对战模式）里的每台车都要往 `owner_rids` 里登记，子弹才不会打自己
 	_projectiles = Projectiles.new()
 	_projectiles.name = "Projectiles"
 	add_child(_projectiles)     # 挂在**场地根**上（世界系）：子弹不能跟着车走
 	_projectiles.gravity = _world_gravity()
 	_projectiles.layers = AIM_LAYERS
-	_projectiles.owner_rids[PLAYER_KEY] = _chassis.get_rid()
+	# 命中过滤器：打掉的零件还留在受击盒几何里（重建限流 0.2 秒）时让子弹**穿过去**，
+	# 否则就是"虚空挡伤害"（用户 2026-10-19 报的）
+	_projectiles.hit_filter = Callable(self, "_hit_is_real")
 	_projectiles.hit.connect(_on_projectile_hit)
-	# 靶子：**我方这台车的复制品**（同零件、同摆放、同血量规则），默认为敌方
+	# 玩家车：一条普通 `_vehicles` 记录（和靶子/人机同一套轮胎物理与毁伤）
+	_player_veh = _spawn_vehicle(
+		vehicle, TEAM_PLAYER, _player_spawn_transform(actual), _spawn_center,
+		true, PLAYER_KEY, "我方"
+	)
+	_chassis = _player_veh["chassis"]
+	_player_rig = _player_veh["rig"]
+	_wheels = _player_veh["wheels"]
+	_turrets = _player_veh["turrets"]
+	_clip_boxes = _player_veh["clip_boxes"]
+	_cam_box_local = _player_rig.bounds_local()
+	_cam_center_local = _chassis.center_of_mass
+	_energy = float(_player_veh["energy"])
+	_energy_max = float(_player_veh["energy_max"])
+	_energy_regen = float(_player_veh["energy_regen"])
+	# 瞄点标记（调武器时直接看转塔在瞄哪儿）
+	if not _turrets.is_empty():
+		_build_aim_marker()
+	# 靶子 / 队友 / 敌人：测试场是"我方载具的复制品"，对战模式由子类换成真人机队伍
 	_spawn_enemy_replicas(vehicle)
 	# 轮胎也算进"整车最高点"（虽然一般比车身低，但先算全了免得漏）
 	for entry in _wheels:
@@ -480,6 +531,108 @@ func _spawn(vehicle: VehicleDef) -> void:
 			AABB(wheel.position - Vector3(radius, radius, radius), Vector3(radius, radius, radius) * 2.0)
 		)
 	_update_hud()
+
+
+## 玩家出生点（世界坐标 + 车头朝向）：测试场在城镇模型上竖直探地面；
+## 对战模式覆盖成"我方这一侧的出生区"（见 `battle_mode.gd`）。
+func _player_spawn_transform(actual: AABB) -> Transform3D:
+	return Transform3D(Basis(), _chassis_spawn_point(actual))
+
+
+## 一台载具进场的**通用**流程（玩家 / 友军 / 人机敌人都走这一条）：
+## 底盘刚体 + 车体（VehicleRig）+ 轮胎 + 转塔 + 能量池。返回 `_vehicles` 里的那条记录。
+##
+## `centre` = 载具坐标系里的包围盒中心（每台车自己的，**不能**共用玩家的 `_spawn_center`）。
+## `team` = TEAM_PLAYER / TEAM_ENEMY，决定碰撞层与友军伤害；
+## `owner_key` = 射弹归属键（`Projectiles.owner_rids` 里一一对应）。
+func _spawn_vehicle(
+	vehicle: VehicleDef, team: int, xform: Transform3D, centre: Vector3,
+	is_player: bool, owner_key: String, label: String
+) -> Dictionary:
+	var chassis := RigidBody3D.new()
+	chassis.name = "Chassis_%s" % owner_key
+	# 悬挂是每帧自己施力的：刚体一旦睡着就不再受力，车会"僵"在原地 —— 别让它睡
+	chassis.can_sleep = false
+	chassis.center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
+	# 只和地形 + 两台车碰撞（自己的层也在掩码里：车和车撞，不分敌我）
+	chassis.collision_layer = int(TEAM_LAYERS[team])
+	chassis.collision_mask = WORLD_LAYER | TEAM_LAYER_PLAYER | TEAM_LAYER_ENEMY
+	chassis.transform = xform
+	add_child(chassis)
+
+	# 车体 = VehicleRig：一个零件一个碰撞盒 + 按 (部件, 路线) 分组的视觉。
+	# **所有**车辆的武器都由 `Turret` 节点画（枪管要转），静态网格里跳过武器。
+	var rig := VehicleRig.new()
+	rig.team = team
+	rig.label_text = label
+	rig.static_skip_weapon = true
+	rig.setup(vehicle, _library, chassis, chassis, true, -centre)
+	var entry := {
+		"rig": rig, "chassis": chassis, "wheels": [], "turrets": [],
+		"is_player": is_player, "team": team, "owner_key": owner_key,
+		"centre": centre, "vehicle": vehicle, "clip_boxes": [],
+		"aim_point": Vector3.ZERO, "wants_fire": false,
+		"energy": 0.0, "energy_max": 0.0, "energy_regen": 0.0, "alive": true,
+		# 头顶血条 / 小地图要用的东西：车名（人机就用载具名）+ 车高（血条挂头顶）
+		"display_name": (
+			vehicle.display_name if not vehicle.display_name.is_empty() else vehicle.id
+		),
+		"height": rig.geometry_bounds_local().size.y,
+	}
+	_vehicles.append(entry)
+	_vehicles_by_rid[chassis.get_rid()] = rig
+	if rig.hitboxes != null:
+		# 轮胎那种"只给子弹看"的受击盒是独立 body：也登记到这台车上
+		_vehicles_by_rid[rig.hitboxes.get_rid()] = rig
+	_team_of_key[owner_key] = team
+	# 轮子：每个轮轴一个自定义轮胎节点（轮胎网格挂它下面，整圈射线在 _apply_wheel 里算）
+	_initialize_vehicle_wheels(entry, vehicle.wheel_specs(_library))
+	# 武器：每个转塔一个节点组（底座固定 / 支架水平 / 枪管俯仰）
+	_add_turrets(entry, vehicle)
+	entry["clip_boxes"] = _collect_clip_boxes(rig, vehicle)
+	# 能量池（核心提供；人机也一样要能量才能开火）
+	var energy := _core_energy(vehicle)
+	entry["energy_max"] = energy.x
+	entry["energy_regen"] = energy.y
+	entry["energy"] = energy.x
+	if _projectiles != null:
+		# 子弹射线**忽略车体**（车体只有整车包围盒），零件级命中走 `hitboxes` 那张 trimesh。
+		# 自己车的判定要把车体 + 受击盒都登记（两个都算"自己"）。
+		_projectiles.ignore_rids.append(chassis.get_rid())
+		var own_rids: Array = [chassis.get_rid()]
+		var rig_for_hit: VehicleRig = entry.get("rig")
+		if rig_for_hit != null and rig_for_hit.hitboxes != null:
+			own_rids.append(rig_for_hit.hitboxes.get_rid())
+		_projectiles.owner_rids[owner_key] = own_rids
+	if not (entry["turrets"] as Array).is_empty():
+		_refresh_vehicle_arcs(entry)
+	print("[进场] %s（队伍 %d）：零件 %d，轮轴 %d，转塔 %d" % [
+		label, team, vehicle.parts.size(), (entry["wheels"] as Array).size(),
+		(entry["turrets"] as Array).size(),
+	])
+	return entry
+
+
+## 给一台车建转塔节点（玩家 / 人机通用），把零件下标记在节点 meta 上（零件被打掉时清）。
+func _add_turrets(veh: Dictionary, vehicle: VehicleDef) -> void:
+	var chassis: RigidBody3D = veh["chassis"]
+	var centre: Vector3 = veh["centre"]
+	var turrets: Array = veh["turrets"]
+	for i in vehicle.parts.size():
+		var def: PartDef = _library.get_def(str(vehicle.parts[i]["part_id"]))
+		if def == null or def.weapon != "turret":
+			continue
+		var place := BuildGrid.cell_transform(def, vehicle.parts[i]["cell"], vehicle.parts[i]["basis"])
+		place.origin -= centre
+		var turret := Turret.new()
+		chassis.add_child(turret)
+		var problem: String = turret.setup(def, place, _library)
+		if not problem.is_empty():
+			if bool(veh["is_player"]):
+				_turret_problem = "%s：%s" % [str(def.id), problem]
+			push_warning("转塔 %s（%s）—— %s" % [str(def.id), str(veh["owner_key"]), problem])
+		turret.set_meta("part_index", int(i))
+		turrets.append(turret)
 
 
 ## 世界重力（格/秒²）：`project.godot` 里写的就是 `PartDef.GRAVITY_CUBES`
@@ -530,11 +683,12 @@ func _spawn_enemy_replicas(vehicle: VehicleDef) -> void:
 		chassis.name = "TargetChassis%d" % i
 		chassis.can_sleep = false          # 轮胎力是每帧自己施的，别让它睡
 		chassis.collision_layer = ENEMY_LAYER
-		# 掩码：撞地形(1)、撞彼此(2)、被玩家车撞(玩家车掩码里也有 2)
-		chassis.collision_mask = 1 | ENEMY_LAYER
+		# 掩码：撞地形 + 撞两台车（自己的层也在里面）
+		chassis.collision_mask = WORLD_LAYER | TEAM_LAYER_PLAYER | TEAM_LAYER_ENEMY
 		chassis.center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
 		add_child(chassis)
 		var rig := VehicleRig.new()
+		rig.team = TEAM_ENEMY
 		rig.label_text = "靶子%d" % i
 		rig.setup(vehicle, _library, chassis, chassis, true, -_spawn_center)
 		# 摆到外圈：抬高一点扔下去，轮胎悬挂会接住（和玩家车一个玩法）。
@@ -547,7 +701,12 @@ func _spawn_enemy_replicas(vehicle: VehicleDef) -> void:
 		)
 		var to_spawn := _chassis.global_position - chassis.global_position
 		chassis.global_rotation = Vector3(0.0, atan2(-to_spawn.z, to_spawn.x), 0.0)
-		var entry := {"rig": rig, "chassis": chassis, "wheels": [], "is_player": false}
+		var entry := {
+			"rig": rig, "chassis": chassis, "wheels": [], "turrets": [],
+			"is_player": false, "team": TEAM_ENEMY, "owner_key": "target%d" % i,
+			"centre": _spawn_center, "vehicle": vehicle, "clip_boxes": [],
+			"aim_point": Vector3.ZERO, "wants_fire": false, "alive": true,
+		}
 		_vehicles.append(entry)
 		_initialize_vehicle_wheels(entry, specs)
 		_enemies.append(rig)
@@ -561,40 +720,102 @@ func _spawn_enemy_replicas(vehicle: VehicleDef) -> void:
 ## `shape_index` 就是**零件下标**（VehicleRig 一个零件一个碰撞盒、只禁用不删除）。
 ## 自己的车体在 Projectiles 里就已经被"吃掉"了，不会走到这里。
 func _on_projectile_hit(
-	body_rid: RID, shape_index: int, _position: Vector3, damage: float, owner_key: String
+	body_rid: RID, shape_index: int, position: Vector3, damage: float, owner_key: String
 ) -> void:
 	var rig: VehicleRig = _vehicles_by_rid.get(body_rid)
 	if rig == null:
 		return                       # 地形之类：火花已经放过了，这里没事可做
 	if rig == _player_rig and owner_key == PLAYER_KEY:
 		return                       # 兜底：打自己（Projectiles 那边已经处理）
-	# 打中的可能是车体上的本体盒，也可能是"只给子弹看"的轮胎受击盒 —— 各查各的表
-	var part := rig.part_index_of_hit(body_rid, shape_index)
+	# **友军伤害关掉**：队友打队友不掉血（火花照放）。敌方打敌方同理 —— 对战模式里
+	# 人机一多，误伤会让"谁在打谁"完全看不懂；判定只看队伍，不看碰撞层。
+	var shooter_team := int(_team_of_key.get(owner_key, -1))
+	if shooter_team >= 0 and rig.team == shooter_team:
+		return
+	# ── 伤害**打包**：高射速机炮一秒能打几十上百发，逐发结算的话每一发都要走
+	# ① 命中点反查零件（原来每发扫一遍 300 个盒子）、② `apply_damage()`（连通性检查 /
+	# 禁用 shape / 同步质量重心）+ 一套毁伤善后 —— 集中交火时就是掉帧的主因。
+	# 现在这里**两个都不做**，只把（命中点, 伤害）记进队列，每物理帧末统一结算一次：
+	# 同一零件这一帧吃的伤害加起来、只调一次 apply_damage、零件反查也只在帧末做一遍。
+	# 参考做法：Unity 的 `RaycastCommand.ScheduleBatch`（一批射线合并成一个 job）、
+	# 以及"每 tick 结算一次伤害"的服务器模型（低 tick 率有假命中/延迟的取舍）。
+	var part := rig.part_index_at(position)
 	if part < 0 or not rig.part_alive(part):
 		return
-	var result := rig.apply_damage(part, damage)
-	if not bool(result["mass_changed"]):
-		_last_hit = "%s 零件 %d 掉了 %.0f 血" % [rig.label(), part, damage]
+	var batch: Dictionary = _damage_batches.get(rig, {})
+	var parts: Dictionary = batch.get("parts", {})
+	parts[part] = float(parts.get(part, 0.0)) + maxf(0.0, damage)
+	batch["parts"] = parts
+	batch["point"] = position
+	batch["count"] = int(batch.get("count", 0)) + 1
+	_damage_batches[rig] = batch
+
+
+## 把这一物理帧攒下来的伤害**按车、按零件合并**结算一次（见 `_on_projectile_hit`）。
+func _flush_damage_batches() -> void:
+	if _damage_batches.is_empty():
 		return
-	var dead := []
-	dead.append_array(result["destroyed"])
-	dead.append_array(result["detached"])
-	_last_hit = "%s 打掉 %d 个零件（溢流 %d）" % [
-		rig.label(), dead.size(), int(result["destroyed"].size())
-	]
-	_on_parts_destroyed(rig, dead)
+	var batches := _damage_batches
+	_damage_batches = {}
+	for key in batches.keys():
+		var rig: VehicleRig = key
+		if rig == null or not is_instance_valid(rig):
+			continue
+		var batch: Dictionary = batches[key]
+		var point: Vector3 = batch.get("point", Vector3.ZERO)
+		var parts: Dictionary = batch.get("parts", {})
+		if parts.is_empty():
+			continue
+		var dead := []
+		var changed := false
+		# 整车的伤害**一次结算**（`apply_damage_batch`）：连同连通性判定、质量/重心同步、
+		# shape 禁用都只做一遍。逐个零件调 `apply_damage()` 时，每死一个零件就要重跑一次
+		# `detached_parts()`（541 件的车 2.25 ms）+ 一次 `sync_body()`（原 2.9 ms）——
+		# 一帧掉 3 个零件就是 15 ms 的纯浪费（实测 20.35 → 见 tools/repro_firefight.gd）。
+		var result := rig.apply_damage_batch(parts)
+		changed = bool(result["mass_changed"])
+		var destroyed := (result["destroyed"] as Array).size()
+		dead.append_array(result["destroyed"])
+		dead.append_array(result["detached"])
+		# 跨队命中（友军伤害在 `_on_projectile_hit` 已经挡掉）—— 对战模式用它做"被命中就点亮"
+		_on_vehicle_damaged(rig)
+		if not changed:
+			_last_hit = "%s 这一帧吃了 %d 发（没掉零件）" % [rig.label(), int(batch.get("count", 1))]
+			continue
+		_last_hit = "%s 这一帧 %d 发打掉 %d 个零件（溢流 %d）" % [
+			rig.label(), int(batch.get("count", 1)), dead.size(), destroyed
+		]
+		_on_parts_destroyed(rig, dead, point)
+
+
+## 手动标记（Q）：测试场里没有敌人，什么也不做 —— 对战模式覆盖它。
+func _on_mark_pressed() -> void:
+	pass
+
+
+## 某台车被子弹打中（友军伤害在上面已经挡掉了）—— 对战模式用它做"被命中就点亮"。
+func _on_vehicle_damaged(_rig: VehicleRig) -> void:
+	pass
 
 
 ## 零件被消灭之后，挂在这些零件上的东西要一起清掉：
 ## 轮胎（整圈射线那套）和转塔节点。玩家车和靶子走同一条路。
-func _on_parts_destroyed(rig: VehicleRig, dead: Array) -> void:
+func _on_parts_destroyed(rig: VehicleRig, dead: Array, hit_point := Vector3.ZERO) -> void:
 	var dead_set := {}
 	for index in dead:
 		dead_set[int(index)] = true
 	# 轮胎：按**这台车**自己的记录删（玩家车 / 靶子一视同仁；`_wheels` 就是玩家那条数组本身）
+	# 轮胎 + 转塔：按**这台车**自己的记录删（玩家 / 靶子 / 人机一视同仁）
 	for veh in _vehicles:
 		if veh["rig"] != rig:
 			continue
+		# 射界的原料（`clip_boxes`）：只有死掉的那几件变了 —— **就地置空**，不整表重建
+		# （旧写法每次掉零件都重建 541 个字典，探针里算在「善后/射界」里）。
+		var clip: Array = veh.get("clip_boxes", [])
+		for index_dead in dead_set.keys():
+			var dead_index := int(index_dead)
+			if dead_index >= 0 and dead_index < clip.size():
+				(clip[dead_index] as Dictionary)["box"] = AABB()
 		var wheels: Array = veh["wheels"]
 		for i in range(wheels.size() - 1, -1, -1):
 			if not dead_set.has(int(wheels[i]["part_index"])):
@@ -603,23 +824,132 @@ func _on_parts_destroyed(rig: VehicleRig, dead: Array) -> void:
 			if wheel_node != null and is_instance_valid(wheel_node):
 				wheel_node.queue_free()
 			wheels.remove_at(i)
-	if rig == _player_rig:
-		var turrets_left := []
-		for turret in _turrets:
-			if dead_set.has(int(turret.get_meta("part_index", -1))):
-				if is_instance_valid(turret):
-					turret.queue_free()
+		var turrets: Array = veh.get("turrets", [])
+		for i in range(turrets.size() - 1, -1, -1):
+			var turret: Turret = turrets[i]
+			if not dead_set.has(int(turret.get_meta("part_index", -1))):
 				continue
-			turrets_left.append(turret)
-		_turrets = turrets_left
-		if _turrets.is_empty() and _aim_marker != null and is_instance_valid(_aim_marker):
-			_aim_marker.visible = false
-		_cam_box_local = rig.bounds_local()
-		# 零件掉了之后体积盒也变了：**真实射界重新算**（打掉挡枪管的零件 → 射界变大）
-		_clip_boxes = _collect_clip_boxes(rig, _vehicle)
-		_refresh_turret_arcs()
+			if is_instance_valid(turret):
+				turret.queue_free()
+			turrets.remove_at(i)
+		# 零件掉了之后体积盒 / 真实射界都变了 —— 但**不是每台转塔都要重算**：
+		# 射界只关心"转点 → 枪口"那一小段，离得远的零件掉不掉跟它没关系
+		# （实测一台转塔重扫要 1.1 ms，你这台车 6 台 = 6.7 ms/轮）。
+		# 这里只把**真被影响**的转塔排进队列，帧末再按队列逐台重算（每帧 1 台）。
+		var affected: Array = []
+		if not turrets.is_empty():
+			var dead_boxes: Array = []
+			for index in dead_set.keys():
+				var dead_box: AABB = rig.part_box(int(index))
+				if dead_box.size.length() > 0.001:
+					dead_boxes.append(dead_box)
+			for turret in turrets:
+				if not is_instance_valid(turret):
+					continue
+				for dead_box in dead_boxes:
+					if (turret as Turret).may_be_affected_by(dead_box):
+						affected.append(turret)
+						break
+		# 零件炸成体素碎片：纯视效（不参与物理），颜色取零件体素的平均色
+		_spawn_debris(veh, rig, dead_set, hit_point)
+		if not affected.is_empty():
+			var queue: Array = veh.get("arc_queue", [])
+			queue.append_array(affected)
+			veh["arc_queue"] = queue
+			veh["arc_dirty"] = true
 	if rig.state.alive_count() == 0:
+		_on_vehicle_eliminated(rig)
+
+
+## 这一发打中的东西是不是"还活着"：打掉的零件在受击盒几何里还会残留最多 0.2 秒（重建限流），
+## 打在这种"已经不存在的零件"上必须当作没打中 —— 子弹穿过去继续飞，而不是被吞掉。
+func _hit_is_real(body_rid: RID, shape_index: int, position: Vector3) -> bool:
+	var rig: VehicleRig = _vehicles_by_rid.get(body_rid)
+	if rig == null:
+		return true                       # 地形 / 看不到的车：照常结算
+	return rig.part_index_of_hit(body_rid, shape_index, position) >= 0
+
+
+## 载具命中查询：**体素 DDA**（`VehicleRig.raycast_hit`），不走物理形状。
+## 载具身上已经没有任何受击 trimesh，所以这一层是子弹打零件的唯一入口。
+## `exclude` 里是这一发已经穿过的刚体（自己的车 / 打穿的车），车体 rid 对得上就跳过。
+func _query_vehicle_hit(from: Vector3, to: Vector3, exclude: Array) -> Dictionary:
+	var best := {}
+	var best_distance := INF
+	for entry: Dictionary in _vehicles:
+		var rig: VehicleRig = entry.get("rig")
+		if rig == null or rig.body == null or not is_instance_valid(rig.body):
+			continue
+		if exclude.has(rig.body.get_rid()):
+			continue
+		var hit := rig.raycast_hit(from, to)
+		if hit.is_empty():
+			continue
+		var distance := from.distance_squared_to(hit["position"])
+		if distance >= best_distance:
+			continue
+		best_distance = distance
+		best = {
+			"collider": rig.body,
+			"shape": -1,
+			"position": hit["position"],
+			"normal": hit["normal"],
+		}
+	return best
+
+
+## 零件被摧毁：炸出一簇体素碎片（纯视效，不参与物理）。
+## `hit_point` = 子弹的命中点：碎片**就爆在打中的地方**。以前按"每个死零件盒的中心"爆，
+## 而一发穿透串起来的断连零件可能分布在全车（甚至另一头），看着就是"打这里、别处虚空爆"
+## （用户 2026-10-19 报的）。现在以命中点为准，只保留命中点附近的零件位置。
+const DEBRIS_HIT_RADIUS := 2.5
+
+func _spawn_debris(
+	veh: Dictionary, rig: VehicleRig, dead: Dictionary, hit_point := Vector3.ZERO
+) -> void:
+	if _debris == null or not is_instance_valid(_debris):
+		return
+	var body: Node3D = rig.body
+	if body == null or not is_instance_valid(body):
+		return
+	var inherit := Vector3.ZERO
+	var chassis: RigidBody3D = veh.get("chassis")
+	if chassis != null and is_instance_valid(chassis):
+		# 只继承一小部分车速：碎片是要"炸在原地"，不是被车带着飞（继承太多时
+		# 高速行驶的车身后会拖一串碎片，看着像"别处在虚空爆"，用户 2026-10-19 报的）
+		inherit = chassis.linear_velocity * 0.35
+	var xform := body.global_transform
+	for index in dead.keys():
+		var part := int(index)
+		var box: AABB = rig.part_box(part)
+		if box.size.length() < 0.01:
+			continue
+		var centre := xform * box.get_center()
+		var at := centre
+		if hit_point != Vector3.ZERO:
+			# 离命中点太远的零件（断连/溢流）不在它自己的位置爆，免得看着像"虚空爆炸"
+			if centre.distance_to(hit_point) > DEBRIS_HIT_RADIUS:
+				continue
+			at = hit_point
+		# 碎片颜色直接来自零件：从它的体素颜色表里每块随机挑一个（多色零件炸出来是混色的）
+		var palette := PackedColorArray([Color(0.72, 0.72, 0.72)])
+		if part >= 0 and part < rig.state.parts.size():
+			var def: PartDef = _library.get_def(str(rig.state.parts[part]["part_id"]))
+			if def != null:
+				palette = def.debris_palette()
+		_debris.burst_colours(at, palette, inherit, Debris.CHUNKS_PER_PART)
+
+
+## 一台车被打光：基类只记"打光了几台靶子"；对战模式覆盖它来统计队伍 / 判胜负。
+func _on_vehicle_eliminated(rig: VehicleRig) -> void:
+	# 自己自爆不算"打光一台靶子"
+	if rig != _player_rig:
 		_kills += 1
+	for veh in _vehicles:
+		if veh["rig"] == rig:
+			veh["alive"] = false
+			veh["wants_fire"] = false
+			break
 
 
 ## 玩家与靶子共用的进场初始化。毁伤只移除车轮，不能重新分摊负载或改动幸存轮参数。
@@ -646,8 +976,11 @@ func _initialize_vehicle_wheels(veh: Dictionary, specs: Array) -> void:
 ## 0.81 格宽的一半 = 外侧面）。挪的是**射线**，轮胎网格和轮心不动。
 func _add_wheel(veh: Dictionary, spec: Dictionary) -> void:
 	var chassis: RigidBody3D = veh["chassis"]
+	# 每台车自己的包围盒中心（玩家 / 人机车型不同，不能共用 `_spawn_center`）。
+	# 老调用方（测试里手搓的 veh）没写 centre 时退回玩家车那个。
+	var centre: Vector3 = veh.get("centre", _spawn_center)
 	var place: Transform3D = spec["transform"]
-	var offset: Vector3 = (spec["offset"] as Vector3) - _spawn_center
+	var offset: Vector3 = (spec["offset"] as Vector3) - centre
 	# 轮胎的转轴 = 零件本地的 x（轮轴那根轴）。节点绕世界 UP 转到这个轴上。
 	var axis: Vector3 = (place.basis * Vector3(1, 0, 0)).normalized()
 	if absf(axis.y) > 0.5:
@@ -667,7 +1000,7 @@ func _add_wheel(veh: Dictionary, spec: Dictionary) -> void:
 	var ray_shift := 0.0
 	if def != null and def.wheel_ray_offset > 0.0:
 		ray_shift = shift_along_local_x(
-			outboard_shift(offset + _spawn_center, _spawn_center, axis, def.wheel_ray_offset),
+			outboard_shift(offset + centre, centre, axis, def.wheel_ray_offset),
 			node_basis * Vector3(1.0, 0.0, 0.0),
 			axis
 		)
@@ -702,6 +1035,11 @@ func _add_wheel(veh: Dictionary, spec: Dictionary) -> void:
 		slip_ref = maxf(0.01, def.wheel_slip_ref)
 		# rays = 0 = **纯单射线模式**（整圈射线全关，只剩悬挂那条）—— 想 A/B "单射线手感"就写 0
 		rays = maxi(0, def.wheel_rays)
+		# 人机 / 靶子的整圈射线压到 `BOT_WHEEL_RAYS`（默认 4）：
+		# 10 台车 × 10 根轴 × 16 条射线是测试场里最贵的一项（实测每 tick 6 ms+），
+		# 而人机不需要玩家那么精确的悬挂手感（它们走开阔地，靠前向射线绕障碍）。
+		if not bool(veh.get("is_player", true)):
+			rays = mini(rays, BOT_WHEEL_RAYS)
 		ray_slack = def.wheel_ray_slack
 		sus_sector = def.wheel_sus_sector
 		anti_roll_tilt = deg_to_rad(def.wheel_anti_roll_tilt_deg)   # 文件里写的是度
@@ -738,8 +1076,12 @@ func _add_wheel(veh: Dictionary, spec: Dictionary) -> void:
 		"spin": 0.0,
 		# 全轮转向：重心之前的轮子正转、之后的轮子反转
 		"steer_sign": float(spec.get("steer_sign", 1.0)),
+		# 转向行程比例：最前/最后的轮轴 1.0，中间的按离中点距离缩小（见 VehicleDef.steer_travel_factor）
+		"steer_factor": float(spec.get("steer_factor", 1.0)),
 		"steer": 0.0,                 # 当前转角（弧度，带 steer_sign 的符号）
 		"hub": hub,                   # 悬挂硬点（底盘本地坐标）
+		# 悬挂/整圈射线共用的排除表（只排自己的车体）：预先建一次，射线循环里复用
+		"exclude": [chassis.get_rid()],
 		"offset": offset,             # 作者摆的轮胎中心（静止位置）
 		"suspension": rest - static_compression,  # 当前悬挂长度（硬点 → 轮心），每帧更新
 		# 整圈射线的轮胎参数
@@ -784,6 +1126,13 @@ func _add_wheel(veh: Dictionary, spec: Dictionary) -> void:
 			deg_to_rad(def.resolved_steer_return_speed()) if def != null else deg_to_rad(90.0)
 		),
 	})
+
+
+## 零件碎片系统（纯视效）：一个 MultiMesh 节点，挂在整个场景里（世界坐标）。
+func _build_debris() -> void:
+	_debris = Debris.new()
+	_debris.name = "Debris"
+	add_child(_debris)
 
 
 func _build_arena() -> void:
@@ -1049,13 +1398,19 @@ func _build_camera() -> void:
 	_camera.name = "Chase"
 	# 相机是每帧在 _process 里手动摆的，不要参与物理插值（否则会被拉回旧位置）
 	_camera.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
-	_camera.fov = 70.0
-	# 初始位置只是个占位：每帧由 _process 按 yaw/pitch/距离重算
+	_camera.fov = _fov
+	# 初始位置只是个占位：每帧由 _process 按 yaw/pitch/固定距离重算
 	_camera.position = Vector3(-CAMERA_DISTANCE, 3.0, 0.0)
 	add_child(_camera)
 
 
 func _build_hud() -> void:
+	# 开镜遮罩：**先加**（画在最底下），这样左上角的速度表/HUD 文字不会被压黑。
+	# 它自己按开镜状态淡入淡出，平时 alpha = 0、几乎不花时间。
+	_scope_overlay = ScopeOverlay.new()
+	_scope_overlay.name = "ScopeOverlay"
+	_scope_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_scope_overlay)
 	# 左上角速度表：大字号，每帧刷新。下面的信息块（FPS/缩放/位置…）让开它的高度。
 	_speedo = Label.new()
 	_speedo.name = "Speedo"
@@ -1100,7 +1455,8 @@ func _update_hud() -> void:
 	var name := str(pending_vehicle.get("name", pending_vehicle.get("id", "")))
 	# 卡顿时把这行发出来就能定位：FPS 低 + draw 少 = 驱动/阴影之类的固定开销；
 	# 物理 ms 高 = 载具太重或轮子参数不对；draw 爆了 = 零件/批次太多。
-	_hud.text = "测试场 · %s\n%s\nFPS %d   draw %d   图元 %d   物理 %.1f ms" % [
+	_hud.text = "%s · %s\n%s\nFPS %d   draw %d   图元 %d   物理 %.1f ms" % [
+		_hud_title(),
 		name,
 		_status,
 		Engine.get_frames_per_second(),
@@ -1110,24 +1466,44 @@ func _update_hud() -> void:
 	]
 	if not _render_info.is_empty():
 		_hud.text += "\n渲染：%s" % _render_info
-	# 场地缩放：按 `[` `]` 现场调，定了倍数就去改 ARENA_SCALE
-	_hud.text += "\n场地缩放 ×%.2f（[ 缩小 · ] 放大）" % _arena_scale
-	# 出生点位置（模型坐标系）：按 ↑↓←→ 推车、`<` `>` 升降，找到好地方把这几个数告诉我
-	if _chassis != null and is_instance_valid(_chassis):
-		var model_pos := _chassis.global_position / maxf(_arena_scale, 0.001)
-		_hud.text += "\n车的位置（模型单位）%.1f, %.1f, %.1f —— ↑↓←→ 推车 · < > 升降" % [
-			model_pos.x, model_pos.y, model_pos.z
+	# 下面这几行是**测试场专用**的调试信息（对战模式会关掉）
+	if _show_debug_hud():
+		# 场地缩放：按 `[` `]` 现场调，定了倍数就去改 ARENA_SCALE
+		_hud.text += "\n场地缩放 ×%.2f（[ 缩小 · ] 放大）" % _arena_scale
+	# 镜头：滚轮调**视野**；右键按住开镜、滚轮调倍率（倍率这一场里记着，收镜不清零）
+	var view_text := "视野 %.1f°（滚轮）" % target_fov()
+	if _scoped:
+		view_text += " ← 开镜 ×%.1f（平时 %.1f° · 滚轮调 %d~%d 倍）" % [
+			_scope_zoom, _fov, int(SCOPE_ZOOM_MIN), int(SCOPE_ZOOM_MAX)
 		]
-	# 网格节点数：正常是一只手数得过来的。要是几百，就是场景被重复建了。
-	_hud.text += "\n网格 %d   场地 %d   载具 %d" % [
-		_count_mesh_nodes(), _count_nodes_of("WorldEnvironment"), _count_nodes_of("RigidBody3D")
-	]
+	else:
+		view_text += " · 右键按住开镜（上次 ×%.1f）" % _scope_zoom
+	_hud.text += "\n" + view_text
+	if _show_debug_hud():
+		# 出生点位置（模型坐标系）：按 ↑↓←→ 推车、`<` `>` 升降，找到好地方把这几个数告诉我
+		if _chassis != null and is_instance_valid(_chassis):
+			var model_pos := _chassis.global_position / maxf(_arena_scale, 0.001)
+			_hud.text += "\n车的位置（模型单位）%.1f, %.1f, %.1f —— ↑↓←→ 推车 · < > 升降" % [
+				model_pos.x, model_pos.y, model_pos.z
+			]
+		# 网格节点数：正常是一只手数得过来的。要是几百，就是场景被重复建了。
+		_hud.text += "\n网格 %d   场地 %d   载具 %d" % [
+			_count_mesh_nodes(), _count_nodes_of("WorldEnvironment"), _count_nodes_of("RigidBody3D")
+		]
 	# 重心（O 键开关）：本地坐标 + 离地高度 + 整车质量 —— 调驾驶手感时盯这一行
 	if _com_visible and _chassis != null and is_instance_valid(_chassis):
 		var com := _chassis.center_of_mass
 		_hud.text += "\n重心（O 关闭）本地 %.2f, %.2f, %.2f · 离地 %.2f 格 · 质量 %.0f kg" % [
 			com.x, com.y, com.z, _com_height, _chassis.mass
 		]
+	# 坐标（F1 开关）：车在哪、准星落在哪、车头朝哪 —— 手动摆场地时照着抄
+	if _show_coords and _chassis != null and is_instance_valid(_chassis):
+		var car_m := _chassis.global_position * PartDef.CUBE_METERS
+		var aim_m := _aim_point * PartDef.CUBE_METERS
+		_hud.text += (
+			"\n坐标 车 (%.1f, %.1f) 米 · 准星落点 (%.1f, %.1f) 米 · 车头 %.0f°（F1 关）"
+			% [car_m.x, car_m.z, aim_m.x, aim_m.z, rad_to_deg(_chassis.global_rotation.y)]
+		)
 	# 武器：转塔在瞄哪儿（距离 / 打到没打到 / 当前两个角），调武器时盯这一行
 	if not _turrets.is_empty():
 		var turret: Turret = _turrets[0]
@@ -1185,9 +1561,152 @@ func _update_hud() -> void:
 			mine = " · 我方零件 %d/%d" % [
 				_player_rig.state.alive_count(), _player_rig.state.part_count()
 			]
-		_hud.text += "\n靶子 %d 台：零件 %d/%d 还在 · 打光 %d 台%s · %s" % [
-			_enemies.size(), alive_parts, all_parts, _kills, mine, _last_hit
+		_hud.text += "\n%s %d 台：零件 %d/%d 还在 · 打光 %d 台%s · %s" % [
+			_enemy_word(), _enemies.size(), alive_parts, all_parts, _kills, mine, _last_hit
 		]
+
+
+## ── ESC 暂停菜单 ───────────────────────────────────────────────────────────
+## 测试场和人机对战共用：ESC 不再直接回主界面，而是**暂停 + 弹菜单**。
+func _build_pause_menu() -> void:
+	_pause_menu = PauseMenu.new()
+	_pause_menu.name = "PauseMenu"
+	add_child(_pause_menu)
+	_pause_menu.resume_requested.connect(_close_pause_menu)
+	_pause_menu.self_destruct_requested.connect(_pause_self_destruct)
+	_pause_menu.quit_requested.connect(_pause_quit_to_menu)
+
+
+func _open_pause_menu() -> void:
+	if _pause_menu == null:
+		return
+	_pause_menu.open()
+	_set_audio_paused(true)
+
+
+func _close_pause_menu() -> void:
+	if _pause_menu == null:
+		return
+	_pause_menu.close()
+	_set_audio_paused(false)
+
+
+## 暂停时把引擎循环音也停住（否则菜单里一直嗡嗡响）；恢复时接着播。
+func _set_audio_paused(value: bool) -> void:
+	for veh in _vehicles:
+		# 引擎声部现在是 3D 的（距离衰减 + 左右声道），类型别写回 2D —— 会报
+		# "Trying to assign AudioStreamPlayer3D to AudioStreamPlayer"
+		var player: AudioStreamPlayer3D = veh.get("audio")
+		if player != null and is_instance_valid(player):
+			player.stream_paused = value
+
+
+## 自爆（菜单里点"确认自爆"）：把玩家车的零件**按正常毁伤流程**全部打爆 ——
+## 所以对战里会走 `_on_vehicle_eliminated()`（算你被击毁），测试场里就是车炸了。
+func _pause_self_destruct() -> void:
+	_close_pause_menu()
+	_self_destruct_player()
+
+
+## 返回主界面：先解除暂停、把这一场**拆干净**再换场景。
+## 用户报过"返回再进战斗会回到上一场 / 东西渲染两次"——换场景本来会释放整棵树，
+## 这里再显式拆一遍，保证下一场一定是全新的一局。
+func _pause_quit_to_menu() -> void:
+	_quit_to_menu()
+
+
+## 回主界面的唯一入口（暂停菜单的"返回主界面"、战斗结束后的 ESC 都走这里）：
+## 解除暂停 → 恢复物理 → 拆场 → 换场景。
+func _quit_to_menu() -> void:
+	_close_pause_menu()
+	teardown_match()
+	get_tree().change_scene_to_file(MENU_SCENE)
+
+
+## 把这一场拆掉：车（含转塔/轮胎）、射弹、场地、相机、暂停菜单引用。
+func teardown_match() -> void:
+	get_tree().paused = false
+	PhysicsServer3D.set_active(true)
+	pending_vehicle = {}
+	_pause_menu = null
+	for veh in _vehicles:
+		var chassis: RigidBody3D = veh.get("chassis")
+		if chassis != null and is_instance_valid(chassis):
+			chassis.queue_free()
+	_vehicles.clear()
+	_vehicles_by_rid.clear()
+	_team_of_key.clear()
+	_wheels.clear()
+	_turrets.clear()
+	_clip_boxes.clear()
+	_player_veh = {}
+	_player_rig = null
+	_enemies.clear()
+	_teardown_mode()
+	_sfx_pool.clear()
+	_sfx_next = 0
+	if _projectiles != null and is_instance_valid(_projectiles):
+		_projectiles.queue_free()
+		_projectiles = null
+	if _aim_marker != null and is_instance_valid(_aim_marker):
+		_aim_marker.queue_free()
+		_aim_marker = null
+	if _camera != null and is_instance_valid(_camera):
+		_camera.queue_free()
+		_camera = null
+	_chassis = null
+	if _arena_root != null and is_instance_valid(_arena_root):
+		_arena_root.queue_free()
+		_arena_root = null
+	_arena_model = null
+
+
+## 子类（对战模式）在拆场时清自己的状态（视野计时 / 目标等）。
+func _teardown_mode() -> void:
+	pass
+
+
+## 自爆的实际效果：所有零件按毁伤流程打爆 + 一圈爆炸火光 + 一声枪响兜底。
+func _self_destruct_player() -> void:
+	if _player_rig == null or _chassis == null:
+		return
+	var dead := []
+	for i in _player_rig.state.part_count():
+		if not _player_rig.state.part_alive(i):
+			continue
+		var result := _player_rig.apply_damage(i, 1.0e12)
+		dead.append_array(result["destroyed"])
+		dead.append_array(result["detached"])
+	if not dead.is_empty():
+		_on_parts_destroyed(_player_rig, dead)
+	if _projectiles != null:
+		var at := _chassis.global_position + Vector3.UP * 2.0
+		for i in 10:
+			var dir := Vector3(cos(float(i) * TAU / 10.0), 0.5 + 0.4 * float(i % 3), sin(float(i) * TAU / 10.0))
+			_projectiles.spawn_impact(at + dir * 3.5, Color(1.0, 0.58, 0.22))
+		_projectiles.spawn_impact(at, Color(1.0, 0.85, 0.4))
+		_projectiles.spawn_impact(at, Color(1.0, 0.45, 0.15))
+	# 自爆的响：用开火音压低音高、加响度，在车的位置播（有距离衰减/左右声道）
+	_play_world_sfx(
+		_chassis.global_position + Vector3.UP * 2.0,
+		GameSettings.shot_stream(), GameSettings.audio_strength("shot") + 6.0, 0.7
+	)
+
+
+## HUD 标题（对战模式改成"对战"）。
+func _hud_title() -> String:
+	return "测试场"
+
+
+## HUD 里那些"调载具用"的调试行（场地缩放 / 出生点 / 节点计数）要不要显示。
+## 对战模式覆盖成 false —— 那是给测试场调载具用的，对战里只会挡视线。
+func _show_debug_hud() -> bool:
+	return true
+
+
+## HUD 里把对面那一队叫什么（测试场是"靶子"，对战是"敌人"）。
+func _enemy_word() -> String:
+	return "靶子"
 
 
 func _count_mesh_nodes() -> int:
@@ -1217,6 +1736,179 @@ func _count_nodes_of(cls: String) -> int:
 func _physics_process(delta: float) -> void:
 	if _chassis == null:
 		return
+	if _prof_on:
+		_prof_start = Time.get_ticks_usec()
+		_prof_t = _prof_start
+		_prof_frame = {}
+	_space = _chassis.get_world_3d().direct_space_state
+	# 每台车各跑一遍轮胎物理：输入来自 `_vehicle_input()`（玩家读键盘，人机由子类给）。
+	# 靶子 / 没人开的车输入恒为 0（它们照样有完整的碰撞 + 悬挂 + 轮胎，推得动、会被打瘸）。
+	var player_input := Vector2.ZERO
+	for veh in _vehicles:
+		var input := _vehicle_input(veh, delta)
+		if bool(veh.get("is_player", false)):
+			player_input = input
+		_drive_vehicle(veh, delta, input.x, input.y)
+	if _prof_on:
+		_prof_t = _prof_lap("轮胎")
+	# 引擎声：**每台车一个循环声部**（以前只有玩家有声音，队友/敌人是哑的）。
+	# 玩家的油门来自按键；人机没有单独存油门，就用"实际速度"当负载 —— 听着足够像。
+	for veh in _vehicles:
+		var body: RigidBody3D = veh.get("chassis")
+		if body == null or not is_instance_valid(body):
+			continue
+		var throttle := 0.0
+		var steer := 0.0
+		if bool(veh.get("is_player", false)):
+			throttle = player_input.x
+			steer = player_input.y
+		else:
+			throttle = clampf(body.linear_velocity.length() / 50.0, 0.0, 1.0)
+		_update_engine_audio(veh, throttle, steer, delta)
+	if _prof_on:
+		_prof_t = _prof_lap("引擎音")
+	_update_com_marker()
+	_update_battle(delta)
+	if _prof_on:
+		_prof_t = _prof_lap("战斗/AI")
+	_update_turrets(delta)
+	if _prof_on:
+		_prof_t = _prof_lap("转塔瞄准")
+	_update_weapons(delta)
+	if _prof_on:
+		_prof_t = _prof_lap("开火判定")
+	if _projectiles != null:
+		_projectiles.step(delta, _space)
+	if _prof_on:
+		_prof_t = _prof_lap("弹道推进")
+	# 伤害打包：这一帧所有命中合并成"每车每零件一次"的结算（集中交火时的最大开销）
+	_flush_damage_batches()
+	if _prof_on:
+		_prof_t = _prof_lap("伤害结算")
+	# 开火声也按帧合并（见 `_queue_shot_sfx` / `_flush_shot_sfx`）
+	_flush_shot_sfx()
+	if _prof_on:
+		_prof_t = _prof_lap("开火音")
+	# 毁伤善后：这一帧里所有命中合并成一次（视觉重建 / 射界重算）——
+	# 一帧中好几发子弹是常态，逐发做的话开局交火就会一顿一顿（用户报的掉帧）。
+	# 射界重算有一个**全局**预算（`ARC_REBUILDS_PER_TICK`）：一台 ~1.1 ms，而 10 台车各自
+	# 排着 1 台的话，旧写法等于一帧算 10 台 = 11 ms（探针实测「善后/射界」11~18 ms 的主因）。
+	var arc_budget := ARC_REBUILDS_PER_TICK
+	# 受击盒 trimesh / 合并盒重建的**全场**预算：一台 ~5 ms + ~3 ms，10 台车同帧各掉零件时
+	# 旧写法一帧要背 10 份（探针实测「善后/射界」26.8 ms）。限成 1 台/帧，最多晚一两帧。
+	var flush_budget := FLUSH_HEAVY_PER_TICK
+	for veh in _vehicles:
+		var rig: VehicleRig = veh.get("rig")
+		if rig != null:
+			var allow_heavy := flush_budget > 0 and rig.needs_heavy_rebuild()
+			if allow_heavy:
+				flush_budget -= 1
+			rig.flush_visuals(allow_heavy)
+		if bool(veh.get("arc_dirty", false)):
+			_flush_damage_work(veh, rig)
+		# 射界：每帧最多重算 `ARC_REBUILDS_PER_FRAME` 台转塔，且全场合计不超过 `arc_budget`
+		var arc_queue: Array = veh.get("arc_queue", [])
+		if arc_budget > 0 and not arc_queue.is_empty():
+			var arc_boxes: Array = veh.get("clip_boxes", [])
+			for _i in mini(mini(ARC_REBUILDS_PER_FRAME, arc_budget), arc_queue.size()):
+				# 队列里的转塔可能在排队期间就被打掉了（它所在的零件死了 → queue_free）：
+				# 先拿 Variant 再用 `is_instance_valid()` 判，别直接赋给带类型的变量（会报"已释放实例"）
+				var queued: Variant = arc_queue.pop_front()
+				if queued == null or not is_instance_valid(queued):
+					continue
+				(queued as Turret).rebuild_arc(arc_boxes)
+				_arc_rebuilds += 1
+				arc_budget -= 1
+	if _prof_on:
+		_prof_t = _prof_lap("善后/射界")
+		_prof_end_frame()
+
+
+## 掉零件后重算射界：每台车每帧最多重算这么多台转塔（一台 ~1.1 ms，6 台一起算就是 6.7 ms）
+const ARC_REBUILDS_PER_FRAME := 1
+## **全场合计**每帧最多重算几台转塔的射界。10 台车各自排 1 台时，旧写法一帧要算 10 台（11 ms）。
+## 取 2 表示"最多让一帧多背 ~2.2 ms"，其余排到后面几帧（射界晚几帧才放开，玩家看不出来）。
+const ARC_REBUILDS_PER_TICK := 2
+## **全场合计**每帧最多允许几台车做"重活"（受击盒 trimesh 重建 / 方块合并盒重建）。
+## 一台约 5 ms + 3 ms；10 台车同帧各掉零件时旧写法一帧背 10 份（实测 26.8 ms）。
+## 取 1 表示最坏一帧只多背 ~8 ms，其余车晚 1~2 帧更新（这几帧里死零件靠命中过滤器挡掉）。
+const FLUSH_HEAVY_PER_TICK := 1
+## 射界累计重算次数（调试 / 基准用）
+var _arc_rebuilds := 0
+
+## ── 帧预算探针（F9 开关）────────────────────────────────────────────────────
+## 打开后每个物理帧给各段打时间戳，每秒打印**这一秒里最慢那一帧**的拆解。
+## 用途：交火掉帧时不用猜是轮胎 / 转塔 / 开火 / 伤害结算哪一段 —— 直接看数字。
+## 关掉时每个标记只多一次 `if` 判断，可以忽略。
+var _prof_on := false
+var _prof_t := 0
+var _prof_start := 0
+var _prof_frame := {}
+var _prof_worst := {}
+var _prof_worst_ms := 0.0
+var _prof_report := 1.0
+
+
+## 打一个时间戳，把"距离上一个标记"记到当前帧；返回新的时间戳。
+func _prof_lap(label: String) -> int:
+	var now := Time.get_ticks_usec()
+	_prof_frame[label] = float(now - _prof_t) / 1000.0
+	return now
+
+
+## 帧末：记下这一秒里最慢的一帧（包括各段拆解）。
+func _prof_end_frame() -> void:
+	var total := float(Time.get_ticks_usec() - _prof_start) / 1000.0
+	if total <= _prof_worst_ms:
+		return
+	_prof_worst_ms = total
+	_prof_worst = _prof_frame.duplicate()
+	_prof_worst["（合计）"] = total
+
+
+## 每秒打印一次当前窗口里最慢的那帧。
+func _prof_dump() -> void:
+	if _prof_worst.is_empty():
+		print("[探针] 这一秒没有采样到物理帧")
+		return
+	print("[探针] 最慢一帧 %.2f ms（60 Hz 预算 16.7 ms）" % _prof_worst_ms)
+	var items: Array = []
+	for key in _prof_worst.keys():
+		if key == "（合计）":
+			continue
+		items.append({"k": key, "v": float(_prof_worst[key])})
+	items.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return float(a["v"]) > float(b["v"])
+	)
+	for entry in items:
+		if float(entry["v"]) < 0.05:
+			continue
+		print("    %-16s %7.2f ms" % [str(entry["k"]), float(entry["v"])])
+	_prof_worst = {}
+	_prof_worst_ms = 0.0
+
+
+## 一台车的毁伤善后（每物理帧最多一次）：更新体积盒（射界的原料）。
+## 注意：**不在这里把转塔全排进队列** —— 队列由 `_on_parts_destroyed()` 只填"真被影响的那些"。
+## `clip_boxes` 也**不再整表重建**：掉的那几个零件在 `_on_parts_destroyed()` 里已经就地置空了
+## （541 个字典重建一次 ~1 ms，而真正变的通常只有 1~3 件）。
+func _flush_damage_work(veh: Dictionary, rig: VehicleRig) -> void:
+	veh["arc_dirty"] = false
+	if rig == null:
+		return
+	if bool(veh.get("is_player", false)):
+		_cam_box_local = rig.bounds_local()
+		_clip_boxes = veh.get("clip_boxes", [])
+		if (veh.get("turrets", []) as Array).is_empty() and _aim_marker != null and is_instance_valid(_aim_marker):
+			_aim_marker.visible = false
+	# 这里不再一次性重算所有转塔（见上面的 `arc_queue`）
+
+
+## 这台车这一帧的输入：(油门, 转向)，各 [-1, 1]。玩家读键盘；
+## 人机 / 靶子默认 0，对战模式覆盖成 AI（见 `battle_mode.gd`）。
+func _vehicle_input(veh: Dictionary, _delta: float) -> Vector2:
+	if not bool(veh.get("is_player", false)):
+		return Vector2.ZERO
 	var throttle := 0.0
 	if Input.is_action_pressed("drive_forward"):
 		throttle += 1.0
@@ -1227,20 +1919,12 @@ func _physics_process(delta: float) -> void:
 		steer += 1.0
 	if Input.is_action_pressed("drive_right"):
 		steer -= 1.0
-	_space = _chassis.get_world_3d().direct_space_state
-	# 每台车各跑一遍轮胎物理：玩家车吃键盘，靶子输入恒为 0
-	# （它们照样有完整的碰撞 + 悬挂 + 轮胎，只是没人开 —— 推得动、会被打瘸）
-	for veh in _vehicles:
-		_drive_vehicle(veh, delta, throttle if bool(veh["is_player"]) else 0.0,
-			steer if bool(veh["is_player"]) else 0.0)
-	# 引擎声只看玩家按键（不看车的实际状态，见 _update_engine_audio 注释）
-	if not _vehicles.is_empty():
-		_update_engine_audio(_vehicles[0], throttle, steer, delta)
-	_update_com_marker()
-	_update_turrets(delta)
-	_update_weapons(delta)
-	if _projectiles != null:
-		_projectiles.step(delta, _space)
+	return Vector2(throttle, steer)
+
+
+## 对战模式每物理帧的钩子（选目标 / 判胜负）。测试场里什么都不做。
+func _update_battle(_delta: float) -> void:
+	pass
 
 
 ## 一台车的轮胎物理（原来只给玩家车写死，现在按 `_vehicles` 逐台跑：玩家车 + 靶车）。
@@ -1249,6 +1933,16 @@ func _drive_vehicle(veh: Dictionary, delta: float, throttle: float, steer: float
 	if chassis == null or not is_instance_valid(chassis):
 		return
 	var wheels: Array = veh["wheels"]
+
+	const BOT_WHEEL_INTERVAL := 1
+	var bot := not bool(veh.get("is_player", false))
+	var phase := int(veh.get("wheel_phase", 0)) + 1
+	veh["wheel_phase"] = phase
+	# 人机 / 靶子每 `BOT_WHEEL_INTERVAL` 个物理帧真正算一次轮子，其余帧沿用上一帧的力。
+	# ⚠️ 这个间隔**不能大**：60 Hz 下取 3（= 20 Hz）时 AI 车会**不停弹跳** —— 悬挂力过期 50 ms，
+	# 车已经离地/换姿态了、力还在按老方向往上顶（用户 2026-10-19 报的）。现在每帧都算（和玩家一样）：
+	# 60 Hz × 每帧 = 每秒 60 次，和"以前 120 Hz × 隔帧"的总量相同，性能不吃亏。
+	var reuse_force := bot and BOT_WHEEL_INTERVAL > 1 and phase % BOT_WHEEL_INTERVAL != 0
 	# 反方向键 = 先刹车：还朝原方向走就先上刹车，等慢下来才真正反向给油。
 	# 速度必须取**地面平面上的投影**：车加速翘头、悬挂起伏、腾空时，车头方向会上仰，
 	# 拿三维点积算出来的 "前进速度" 会变成负数 —— 于是踩着 W 反而被判成"在反方向"，
@@ -1264,7 +1958,25 @@ func _drive_vehicle(veh: Dictionary, delta: float, throttle: float, steer: float
 	var forward_speed := flat_velocity.dot(flat_forward)
 	var grounded := false
 	var ground_y := INF
+	# 轮胎自转只是**视觉**：太远（>200 米）就跳过，10 台车 100 个轮子时这里也是几毛秒
+	var spin_visible := true
+	if _camera != null and is_instance_valid(_camera):
+		spin_visible = (
+			_camera.global_position.distance_squared_to(chassis.global_position) < 400.0 * 400.0
+		)
 	for entry in wheels:
+		if reuse_force:
+			# 沿用上一帧的接触力和作用点（几乎不变），省掉整轮 math
+			if bool(entry.get("contact", false)):
+				grounded = true
+				var cached: Vector3 = entry.get("last_force", Vector3.ZERO)
+				if cached != Vector3.ZERO:
+					chassis.apply_force(
+						cached,
+						(entry.get("last_point", chassis.global_position) as Vector3)
+						- chassis.global_position
+					)
+			continue
 		# 每个轮子用自己的部件参数：推力/刹车/限速/转向角都写在 .part.txt 里
 		var braking := (
 			throttle != 0.0
@@ -1288,7 +2000,10 @@ func _drive_vehicle(veh: Dictionary, delta: float, throttle: float, steer: float
 		#   * **松手回正**（输入回中）单独用 `wheel_steer_return_speed` —— 想"撒手就正"
 		#     就把它写得比打方向快，而打方向那段的手感一点不变（用户报的"松开还在转"）。
 		# 每个轮轴各读自己那一份，所以不同轮轴可以有不同的转向 / 回正速度。
-		var target_steer := float(entry["steer_sign"]) * steer * float(entry["steer_max"])
+		var target_steer := (
+			float(entry["steer_sign"]) * steer * float(entry["steer_max"])
+			* float(entry.get("steer_factor", 1.0))
+		)
 		var steer_rate := (
 			float(entry["steer_return_speed"]) if absf(steer) <= 0.01
 			else float(entry["steer_speed"])
@@ -1299,7 +2014,8 @@ func _drive_vehicle(veh: Dictionary, delta: float, throttle: float, steer: float
 		if bool(entry.get("contact", false)):
 			grounded = true
 			ground_y = minf(ground_y, (entry["node"] as Node3D).global_position.y - float(entry["radius"]))
-		_spin_tire(entry, flat_forward, flat_velocity, force, delta)
+		if spin_visible:
+			_spin_tire(entry, flat_forward, flat_velocity, force, delta)
 	_apply_anti_roll(veh, grounded, ground_y)
 	_apply_handling_aids(veh, chassis, steer, delta)
 
@@ -1461,38 +2177,74 @@ static func upright_torque(
 ##   `pitch_low`/`idle` 升到 `pitch_high`/`full`，像"给油给上去了"）；只按转向 = 中间怠速；
 ##   **全松开 → 淡出并真正停掉**。三个参数和两个响度都在 `data/audio.txt`。
 ## 素材强度和音色都在 `data/audio.txt` / `assets/audio/engine_loop.wav`（CC0）。
-## 只有玩家车有引擎声（靶子没人开，不需要）。
+## **每台车都有引擎声**（玩家 / 队友 / 敌人），用 `AudioStreamPlayer3D` 挂在底盘上：
+## 距离衰减和左右声道由 3D 音频自己算（听者是玩家相机，见 scripts/spatial_audio.gd）。
+## 把引擎音效的调参读一次（`GameSettings.engine_*()` 每组都要读文件字典）。
+func _cache_engine_audio() -> void:
+	_eng_pitch_low = GameSettings.engine_pitch_low()
+	_eng_pitch_high = GameSettings.engine_pitch_high()
+	_eng_ramp = maxf(0.01, GameSettings.engine_ramp_seconds())
+	_eng_db_idle = GameSettings.engine_db_idle()
+	_eng_db_full = GameSettings.engine_db_full()
+
+
 func _update_engine_audio(veh: Dictionary, throttle: float, steer: float, delta: float) -> void:
-	var player: AudioStreamPlayer = veh.get("audio")
+	# 太远（超过 3D 声部的最大距离）就直接静音：既听不见，也算这堆插值是浪费 ——
+	# 10 台车同场时这一项实测 ~1.5 ms/tick。
+	var chassis_body: RigidBody3D = veh.get("chassis")
+	if chassis_body == null or not is_instance_valid(chassis_body):
+		return
+	if _camera != null and is_instance_valid(_camera):
+		if (
+			_camera.global_position.distance_squared_to(chassis_body.global_position)
+			> SpatialAudio.MAX_DISTANCE_CUBES * SpatialAudio.MAX_DISTANCE_CUBES
+		):
+			var far: AudioStreamPlayer3D = veh.get("audio")
+			if far != null and far.playing:
+				far.stop()
+			return
+	# 引擎音效：玩家每 2 个物理帧更新一次（60 Hz）；AI 车每 3 帧（40 Hz）—— 听感没区别
+	var phase := int(veh.get("audio_phase", 0)) + 1
+	veh["audio_phase"] = phase
+	var audio_interval := 2 if bool(veh.get("is_player", false)) else 3
+	if phase % audio_interval != 1:
+		return
+	var player: AudioStreamPlayer3D = veh.get("audio")
 	if player == null:
 		var stream := GameSettings.engine_stream()
 		if stream == null:
 			return                    # 编辑器里 / 素材没导入：安静就好，别报错
-		player = AudioStreamPlayer.new()
+		player = AudioStreamPlayer3D.new()
 		player.name = "EngineAudio"
 		player.stream = stream
 		player.bus = GameSettings.BUS_SFX
 		player.volume_db = -80.0      # 先"关着"，等按键再响
+		SpatialAudio.configure(player)   # 距离衰减 + 左右声道，关多普勒
 		(veh["chassis"] as RigidBody3D).add_child(player)
 		veh["audio"] = player
 	var gas := absf(throttle)
 	var active := gas > 0.01 or absf(steer) > 0.01
+	# 车被打光（对战里 `alive` 会置 false）就不该再有引擎声
+	if not bool(veh.get("alive", true)):
+		if player.playing:
+			player.stop()
+		return
 	# 油门按住多久了（松开/换向就归零）—— 引擎的"上扬"只看这个，不看车速
 	var hold := float(veh.get("throttle_hold", 0.0))
 	hold = (hold + delta) if gas > 0.01 else 0.0
 	veh["throttle_hold"] = hold
 	# 0 = 刚按下（低转），1 = 按满 ramp_seconds 秒（高转）
-	var rev := clampf(hold / GameSettings.engine_ramp_seconds(), 0.0, 1.0)
-	var pitch_low := GameSettings.engine_pitch_low()
-	var pitch_high := GameSettings.engine_pitch_high()
+	var rev := clampf(hold / _eng_ramp, 0.0, 1.0)
+	var pitch_low := _eng_pitch_low
+	var pitch_high := _eng_pitch_high
 	# 音高：只按转向 = 中间怠速；给油 = 从 low 一路升到 high
 	var target_pitch := lerpf(pitch_low, pitch_high, rev) if gas > 0.01 else (pitch_low + pitch_high) * 0.5
 	var target_db := -80.0
 	if active:
 		target_db = (
-			GameSettings.engine_db_idle()
+			_eng_db_idle
 			if gas <= 0.01
-			else lerpf(GameSettings.engine_db_idle(), GameSettings.engine_db_full(), rev)
+			else SpatialAudio.engine_db(_eng_db_idle, _eng_db_full, rev)
 		)
 		if not player.playing:
 			player.play()
@@ -1504,17 +2256,108 @@ func _update_engine_audio(veh: Dictionary, throttle: float, steer: float, delta:
 		player.stop()
 
 
+## ── 世界音效（开火声）──────────────────────────────────────────────────────
+## 在声源的世界坐标上播一个 3D 声部：距离越远越轻、左右按声源相对相机的方向给。
+## 用池子轮着播（10 台车一起开火也不会互相打断）。
+## 同一帧的开火音效先**排队**，帧末合并播放。
+## 60 台枪同时打的时候一帧可能有好几发，逐发播的话每发都要动一个 3D 声部，
+## 32 个声部被反复抢占（声音糊成一片、还白花引擎调用）。规则：
+## * 一帧最多播 `SFX_MAX_PER_FRAME` 发，优先离镜头近的；
+## * 被丢掉的按数量补一点音量（多出来的枪声"叠"成更响的一发，听感上还是连着打）。
+const SFX_MAX_PER_FRAME := 3
+var _sfx_queue: Array = []
+
+
+func _queue_shot_sfx(at: Vector3, stream: AudioStream, base_db: float, pitch := 1.0) -> void:
+	if stream == null:
+		return
+	_sfx_queue.append({"at": at, "stream": stream, "db": base_db, "pitch": pitch})
+
+
+## 把这一帧排队的开火声合并播放（见 `_queue_shot_sfx`）。
+func _flush_shot_sfx() -> void:
+	if _sfx_queue.is_empty():
+		return
+	var requests := _sfx_queue
+	_sfx_queue = []
+	var camera_pos := Vector3.ZERO
+	var has_camera := _camera != null and is_instance_valid(_camera)
+	if has_camera:
+		camera_pos = _camera.global_position
+	var alive: Array = []
+	for request in requests:
+		var at: Vector3 = request["at"]
+		if has_camera and camera_pos.distance_to(at) > SpatialAudio.MAX_DISTANCE_CUBES:
+			continue        # 太远：连声部都不占
+		alive.append(request)
+	if alive.is_empty():
+		return
+	if has_camera:
+		alive.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			return (
+				camera_pos.distance_squared_to(a["at"])
+				< camera_pos.distance_squared_to(b["at"])
+			)
+		)
+	var play_count := mini(alive.size(), SFX_MAX_PER_FRAME)
+	var dropped := alive.size() - play_count
+	# 丢掉的枪声按数量补音量（+6 dB 封顶）：听感上是"更密更响"，不会变成静音
+	var boost := clampf(20.0 * log(1.0 + float(dropped) * 0.5) / log(10.0), 0.0, 6.0)
+	for i in play_count:
+		var request: Dictionary = alive[i]
+		_play_world_sfx(
+			request["at"], request["stream"], float(request["db"]) + boost,
+			float(request["pitch"])
+		)
+
+
+func _play_world_sfx(at: Vector3, stream: AudioStream, base_db: float, pitch := 1.0) -> void:
+	if stream == null:
+		return
+	if _sfx_pool.is_empty():
+		for i in 32:
+			var voice := AudioStreamPlayer3D.new()
+			voice.name = "Sfx%d" % i
+			voice.bus = GameSettings.BUS_SFX
+			voice.volume_db = -80.0
+			SpatialAudio.configure(voice)   # 距离衰减 + 左右声道
+			add_child(voice)
+			_sfx_pool.append(voice)
+	var player := _sfx_pool[_sfx_next]
+	_sfx_next = (_sfx_next + 1) % _sfx_pool.size()
+	if _camera != null and is_instance_valid(_camera):
+		# 太远就别占声部了（引擎那边同样距离也会静音）
+		if _camera.global_position.distance_to(at) > SpatialAudio.MAX_DISTANCE_CUBES:
+			return
+	player.global_position = at
+	player.stream = stream
+	player.volume_db = base_db
+	player.pitch_scale = pitch
+	player.play()
+
+
 ## ── 武器：瞄点 + 转塔 ──────────────────────────────────────────────────────
 ## 瞄准规则（用户定的）：瞄点 = **瞄准视线的首个敌人/地形交点**；
 ## 视线就是相机准星（屏幕中心）那条射线 —— 对着天打不到东西时取射线的远端。
 ## 拿到瞄点后，每个转塔朝它转（射界/俯仰的夹紧在 Turret.solve_aim 里，走最短路径）。
 func _update_turrets(delta: float) -> void:
-	if _turrets.is_empty():
+	var any_turrets := false
+	for veh in _vehicles:
+		if not (veh.get("turrets", []) as Array).is_empty():
+			any_turrets = true
+			break
+	if not any_turrets:
 		return
+	# 玩家的瞄点来自相机准星；玩家没枪也照样算（HUD 要显示），人机的瞄点由 AI 给。
 	_aim_point = _aim_point_from_camera()
-	for turret in _turrets:
-		# 按炮塔转速限制慢慢跟（不是瞬间对准）：转速写在部件文件里（度/秒）
-		turret.update_aim(_aim_point, delta)
+	for veh in _vehicles:
+		var turrets: Array = veh.get("turrets", [])
+		if turrets.is_empty():
+			continue
+		var target: Vector3 = _aim_point if bool(veh.get("is_player", false)) else veh["aim_point"]
+		for turret in turrets:
+			# 按炮塔转速限制慢慢跟（不是瞬间对准）：转速写在部件文件里（度/秒）
+			turret.update_aim(target, delta)
 	if _aim_marker != null and is_instance_valid(_aim_marker):
 		_aim_marker.global_position = _aim_point
 
@@ -1522,22 +2365,28 @@ func _update_turrets(delta: float) -> void:
 ## 枪口 → 子弹生成点那一段里，**第一个**被自家零件挡住的地方（世界坐标）。
 ## "枪口贴脸自吃"时把命中小爆炸放在这儿 —— 弹丸压根没生成，得靠这个特效才看得见打在哪儿。
 ## 这一段只有 1 格，采 8 个点足够；一个都没采到就退回起点。
-func _first_blocked_point(from: Vector3, to: Vector3, skip_index: int) -> Vector3:
-	if _chassis == null:
+## `boxes` / `chassis` 不传就用玩家车那一套（测试直接打这个函数时只传前三个参数）。
+func _first_blocked_point(
+	from: Vector3, to: Vector3, skip_index: int,
+	boxes: Array = [], chassis: RigidBody3D = null
+) -> Vector3:
+	var body: RigidBody3D = chassis if chassis != null else _chassis
+	var clip: Array = boxes if not boxes.is_empty() else _clip_boxes
+	if body == null:
 		return from
-	var to_local := _chassis.global_transform.affine_inverse()
+	var to_local := body.global_transform.affine_inverse()
 	var a := to_local * from
 	var b := to_local * to
 	for i in range(1, 9):
 		var point := a.lerp(b, float(i) / 8.0)
-		for j in _clip_boxes.size():
+		for j in clip.size():
 			if j == skip_index:
 				continue
-			var box: AABB = _clip_boxes[j]["box"]
+			var box: AABB = clip[j]["box"]
 			if box.size.x <= 0.001 or box.size.y <= 0.001 or box.size.z <= 0.001:
 				continue
 			if box.has_point(point):
-				return _chassis.global_transform * point
+				return body.global_transform * point
 	return from
 
 
@@ -1546,104 +2395,180 @@ func _first_blocked_point(from: Vector3, to: Vector3, skip_index: int) -> Vector
 ## 和受击/毁伤用的是同一份口径。名字里带上部件 id，HUD 里能直接看出"被谁挡住"。
 func _collect_clip_boxes(rig: VehicleRig, vehicle: VehicleDef) -> Array:
 	var out := []
-	for i in rig.shapes.size():
-		var box := AABB()
-		var shape: CollisionShape3D = rig.shapes[i]
-		# 已经被打掉的零件不再挡射界（它的 shape 还留着占位，但已经 disabled）
-		if rig.part_alive(i) and shape != null and shape.shape is BoxShape3D:
-			var size: Vector3 = (shape.shape as BoxShape3D).size
-			box = AABB(shape.position - size * 0.5, size)
+	# ⚠️ 读**每个零件的本体盒**（`VehicleRig.part_boxes()`），不是车体的 shape：
+	# 车体现在只有一个整车包围盒（性能优化），拿它当"零件盒"会把所有转塔的射界全堵死。
+	var boxes: Array = rig.part_boxes()
+	var all_planes: Array = rig.part_planes()
+	for i in boxes.size():
+		var box: AABB = boxes[i]
 		var part_id := "--"
-		if i < vehicle.parts.size():
+		# 手搓的 veh（测试）可能没带 vehicle：那就只用下标当名字
+		if vehicle != null and i < vehicle.parts.size():
 			part_id = str(vehicle.parts[i]["part_id"])
-		out.append({"box": box, "name": "%s #%d" % [part_id, i]})
+		# `planes` = 这一件的凸包半空间（射界按真实形状挡，半砖不再当成整格方块）
+		var planes: Array = (all_planes[i] as Array) if i < all_planes.size() else []
+		out.append({"box": box, "name": "%s #%d" % [part_id, i], "planes": planes})
 	return out
 
 
 ## 重算每台转塔的**真实射界**（角网格 + 连通域，见 `Turret.rebuild_arc()`）。
 ## 时机：进场看到车体之后、以及**零件被打掉之后**（打掉挡路的零件，射界就变大了）。
 func _refresh_turret_arcs() -> void:
-	if _clip_boxes.is_empty():
+	for veh in _vehicles:
+		_refresh_vehicle_arcs(veh)
+
+
+## 重算**某一台车**所有转塔的真实射界（进场时一次，零件被打掉之后再算一次）。
+## 每台车用自己的 `clip_boxes` —— 人机和玩家的车体不是同一块体积。
+func _refresh_vehicle_arcs(veh: Dictionary) -> void:
+	var turrets: Array = veh.get("turrets", [])
+	var boxes: Array = veh.get("clip_boxes", [])
+	if turrets.is_empty() or boxes.is_empty():
 		return
 	var all_blocked := 0
-	for turret in _turrets:
-		turret.rebuild_arc(_clip_boxes)
+	for turret in turrets:
+		turret.rebuild_arc(boxes)
 		# 诊断（用户报"有些武器无法正常判定遮挡转动"）：射界**算不出来**（转塔没装好）或者
 		# **整片被挡**（枪管一转就穿零件）时必须留一句话 —— 否则那条枪会静默地"随便转、
-		# 被挡也照打"，查起来一头雾水。
+		# 被挡也照打"，查起来一头雾水。人机车不刷这个（10 台车会把日志刷爆）。
 		if not turret.arc_ready():
-			push_warning("测试场：%s 的真实射界算不出来（转塔节点没装起来）" % turret.part_id)
+			if bool(veh.get("is_player", false)):
+				push_warning(
+					"转塔 %s 的真实射界算不出来（转塔节点没装起来）" % turret.part_id
+				)
 		elif turret.arc_free_ratio() <= 0.001:
 			all_blocked += 1
-	if all_blocked > 0:
+	if all_blocked > 0 and bool(veh.get("is_player", false)):
 		push_warning(
 			"测试场：%d 台转塔的真实射界整片被挡（周围有零件压着枪管），它们转不了也打不了"
 			% all_blocked
 		)
 
 
-## 能量 + 开火：整车一口能量池（核心提供上限与恢复），所有武器共用。
-## 扳机按住时按 rpm 决定这一帧打几发；每发先扣能量，不够就哑火（`_dry_fires` 记账）。
+## 能量 + 开火：**每台车**一口能量池（核心提供上限与恢复），它的所有武器共用。
+## 玩家：按住开火键就打；人机：由 `veh["wants_fire"]` 决定（对战模式的 AI 设）。
+## 每发先扣能量，不够就哑火（HUD 只记玩家那台的账）。
 func _update_weapons(delta: float) -> void:
-	if _energy_max > 0.0:
-		_energy = minf(_energy_max, _energy + _energy_regen * delta)
-	if _turrets.is_empty() or _projectiles == null:
+	if _projectiles == null:
 		return
-	if not Input.is_action_pressed(FIRE_ACTION):
-		for turret in _turrets:
-			turret.arc_blocked_by = ""   # 松手就把"射界外"的提示清掉
-		return
-	var inherit := _chassis.linear_velocity
-	for turret in _turrets:
-		# 开火自检（用户规则）：射界里允许有零件，但只有在**真实射界**（和初始枪口朝向连通、
-		# 且枪管不穿模的那一片）里才能开火。每帧查一次格子，代价可以忽略。
-		var blocked: String = turret.arc_reason()
-		turret.arc_blocked_by = blocked
-		for _shot in turret.ready_shots(delta):
-			if not blocked.is_empty():
-				_jam_fires += 1
-				continue
-			if _energy < turret.energy_cost:
-				_dry_fires += 1
-				continue
-			# 枪口贴脸：子弹是从"枪口沿枪轴再外推 1 格"生成的（`Turret.MUZZLE_PAD`），
-			# 那 1 格里的自家方块会被**整个跨过去** —— 症状就是"近处方块打不中自己、子弹穿过去"。
-			# 这里先把枪口→生成点这一段查一遍：有东西就直接算打在自己身上（吃掉这一发）。
-			var spawn: Vector3 = turret.fire_origin()
-			var muzzle_now: Vector3 = turret.muzzle_position()
-			var slam := Turret.segment_blocker(
-				muzzle_now, spawn, _clip_boxes, int(turret.get_meta("part_index", -1))
-			)
-			_energy -= turret.energy_cost
-			_shots_fired += 1
-			# 显式写类型：`turret` 是数组里的 Variant，`:=` 推不出类型（本项目把这种当错误）
-			var dir: Vector3 = turret.barrel_direction()
-			# 枪口闪光（挂在枪管上的火舌）+ 从**真枪口**拉出来的第一段光带（近身也看得见弹道）
-			turret.flash()
-			GameSettings.play_shot()   # 机枪开火音（响度在 data/audio.txt 的 shot，池子能叠）
-			if not slam.is_empty():
-				# 打在自己身上：不生成弹丸（弹丸的射线是从生成点开始的，跨过的那 1 格它永远看不到）
-				_muzzle_eaten += 1
-				_last_hit = "枪口被 %s 挡住，这一发打在自己身上" % slam
-				# 照样给个命中小爆炸（用户要看得见），位置取那 1 格里**第一个被挡住的地方**
-				if _projectiles != null:
-					_projectiles.spawn_impact(
-						_first_blocked_point(
-							muzzle_now, spawn, int(turret.get_meta("part_index", -1))
-						)
+	for veh in _vehicles:
+		var turrets: Array = veh.get("turrets", [])
+		if turrets.is_empty():
+			continue
+		var is_player := bool(veh.get("is_player", false))
+		var energy_max := float(veh.get("energy_max", 0.0))
+		var energy := float(veh.get("energy", 0.0))
+		if energy_max > 0.0:
+			energy = minf(energy_max, energy + float(veh.get("energy_regen", 0.0)) * delta)
+		var wants := Input.is_action_pressed(FIRE_ACTION) if is_player else bool(veh.get("wants_fire", false))
+		if not wants:
+			for turret in turrets:
+				turret.arc_blocked_by = ""   # 松手就把"射界外"的提示清掉
+			veh["energy"] = energy
+			if is_player:
+				_energy = energy
+			continue
+		var chassis: RigidBody3D = veh["chassis"]
+		var inherit := chassis.linear_velocity
+		var boxes: Array = veh.get("clip_boxes", [])
+		var owner_key := str(veh.get("owner_key", PLAYER_KEY))
+		for turret in turrets:
+			# 开火自检（用户规则）：射界里允许有零件，但只有在**真实射界**（和初始枪口朝向连通、
+			# 且枪管不穿模的那一片）里才能开火。每帧查一次格子，代价可以忽略。
+			var blocked: String = turret.arc_reason()
+			turret.arc_blocked_by = blocked
+			for _shot in turret.ready_shots(delta):
+				if not blocked.is_empty():
+					if is_player:
+						_jam_fires += 1
+					continue
+				if energy < turret.energy_cost:
+					if is_player:
+						_dry_fires += 1
+					continue
+				# 枪口贴脸：子弹是从"枪口沿枪轴再外推 `MUZZLE_PAD` 格"生成的，
+				# 那 1 格里的自家方块会被**整个跨过去**。先把枪口→生成点这一段查一遍：
+				# 有东西就直接算打在自己身上（吃掉这一发）。
+				var spawn: Vector3 = turret.fire_origin()
+				var muzzle_now: Vector3 = turret.muzzle_position()
+				var slam := Turret.segment_blocker(
+					muzzle_now, spawn, boxes, int(turret.get_meta("part_index", -1))
+				)
+				energy -= turret.energy_cost
+				if is_player:
+					_shots_fired += 1
+				# 显式写类型：`turret` 是数组里的 Variant，`:=` 推不出类型（本项目把这种当错误）
+				var dir: Vector3 = turret.barrel_direction()
+				# 枪口闪光（挂在枪管上的火舌）+ 从**真枪口**拉出来的第一段光带（近身也看得见弹道）
+				turret.flash()
+				# 开火音：**所有车**都按世界坐标播（距离衰减 + 左右声道），不再只有玩家能听见。
+				# 枪口位置当声源 —— 对面的枪声会从屏幕对应的一侧传过来。
+				# 开火音先排队，帧末合并播放（同一帧几十发只占几个声部，见 `_flush_shot_sfx`）
+				# 音高乘上这把枪的 `weapon_pitch`：重机枪 0.78 → 比轻机枪低沉
+				_queue_shot_sfx(
+					muzzle_now, GameSettings.shot_stream(),
+					GameSettings.audio_strength("shot"),
+					randf_range(0.94, 1.06) * turret.weapon_pitch
+				)
+				if not slam.is_empty():
+					# 打在自己身上：不生成弹丸（弹丸的射线是从生成点开始的，跨过的那 1 格它永远看不到）
+					if is_player:
+						_muzzle_eaten += 1
+						_last_hit = "枪口被 %s 挡住，这一发打在自己身上" % slam
+					# 照样给个命中小爆炸（用户要看得见），位置取那 1 格里**第一个被挡住的地方**
+					var blocked_point := _first_blocked_point(
+						muzzle_now, spawn, int(turret.get_meta("part_index", -1)),
+						boxes, chassis
 					)
-				continue
-			_projectiles.fire(
-				spawn,
-				dir,
-				turret.muzzle_speed,
-				turret.spread_deg,
-				turret.damage,
-				turret.projectile_life,
-				inherit,
-				PLAYER_KEY,
-				muzzle_now
-			)
+					_projectiles.spawn_impact(blocked_point, turret.bullet_color)
+					continue
+				var fired := false
+				if turret.is_ray():
+					# 射线类武器（`weapon_projectile = ray`）：**瞬间命中**，从真枪口打出去。
+					# 没有弹速 / 下坠 / 寿命，只有最大射程；扩散和伤害衰减照旧。
+					fired = _projectiles.fire_ray(
+						_space,
+						muzzle_now,
+						dir,
+						turret.spread_deg,
+						turret.damage,
+						turret.ray_range,
+						turret.bullet_spec(),
+						owner_key
+					)
+				else:
+					fired = _projectiles.fire(
+						spawn,
+						dir,
+						turret.muzzle_speed,
+						turret.spread_deg,
+						turret.damage,
+						turret.projectile_life,
+						inherit,
+						owner_key,
+						muzzle_now,
+						turret.bullet_spec()
+					)
+				# 后坐：每发把车沿枪管反方向推一下，作用点在**枪口** ——
+				# 所以偏心装的枪会带一点力矩（车会被推得歪一下），和真枪一样。
+				if fired:
+					var recoil := recoil_impulse_vector(dir, turret.recoil_impulse)
+					if recoil != Vector3.ZERO:
+						chassis.apply_impulse(recoil, muzzle_now - chassis.global_position)
+		veh["energy"] = energy
+		if is_player:
+			_energy = energy
+
+
+## 后坐冲量向量（纯函数，测试直接打它）：方向 = **枪管反方向**（把车往后推），
+## 大小 = 部件文件的 `weapon_recoil_impulse`。0 = 没后坐。
+static func recoil_impulse_vector(barrel_dir: Vector3, impulse: float) -> Vector3:
+	if impulse <= 0.0:
+		return Vector3.ZERO
+	var direction := barrel_dir.normalized()
+	if direction.length() < 0.001:
+		return Vector3.ZERO
+	return -direction * impulse
 
 
 ## 相机准星射线 → 瞄点。自家底盘要按 RID 排除（它和地形同在碰撞层 1）。
@@ -1656,11 +2581,24 @@ func _aim_point_from_camera() -> Vector3:
 	var to := from + dir * AIM_RANGE
 	_aim_hit = false
 	if _space != null:
-		var exclude: Array[RID] = [_chassis.get_rid()]
+		# 排除**所有车的车体**（那是整车包围盒，不是真实外形）—— 不然准星瞄车顶时，
+		# 射线先打到"比真实外形更高的方盒顶面"，瞄点飘在车顶上方几格，子弹就全打天上
+		# （用户 2026-10-19 报的）。排除车体后，射线打的是 `hitboxes` 上的**真实零件几何**；
+		# 自己车的受击盒也排除（否则准星会先打到自己的车）。
+		var exclude: Array[RID] = []
+		for veh in _vehicles:
+			var chassis_body: CollisionObject3D = veh.get("chassis")
+			if chassis_body != null and is_instance_valid(chassis_body):
+				exclude.append(chassis_body.get_rid())
+		if _player_rig != null and _player_rig.hitboxes != null:
+			exclude.append(_player_rig.hitboxes.get_rid())
 		var query := PhysicsRayQueryParameters3D.create(from, to, AIM_LAYERS, exclude)
 		var hit := _space.intersect_ray(query)
 		if not hit.is_empty():
 			_aim_hit = true
+			# 瞄点 = 准星指到的地方（命中点）。**不能**吸到敌人的中心 ——
+			# 那样"准星只要在对方车上，枪就无脑锁质心"，完全不听玩家指挥（用户 2026-10-19 报的）。
+			# 打掉的零件残影问题由"受击盒每帧重建"解决（见 `VehicleRig.flush_visuals()`）。
 			return hit["position"]
 	return to
 
@@ -1772,12 +2710,14 @@ func _wheel_contact(chassis: RigidBody3D, entry: Dictionary) -> Dictionary:
 	var radius := float(entry["radius"])
 	var rest := float(entry["rest"])
 	var travel := float(entry["travel"])
-	var exclude: Array[RID] = [chassis.get_rid()]
 	var axle := node.global_transform.basis.x.normalized()
 	var shift := axle * float(entry["ray_shift"])
 	var hub := xform * (entry["hub"] as Vector3) + shift
 	var reach := rest + radius
-	var query := PhysicsRayQueryParameters3D.create(hub, hub + down * reach, 1, exclude)
+	# ⚠️ 复用**同一个** query 对象：以前每条射线都 `create()` 一个新的 RefCounted +
+	# 一个新的 exclude 数组 —— 10 台车 × 10 根轴 × 16 条射线时每 tick 上千次分配，
+	# 光是分配/回收就是这一项耗时的很大一块（实测 `_drive_vehicle` 每 tick 6 ms+）。
+	var query := PhysicsRayQueryParameters3D.create(hub, hub + down * reach, 1, (entry["exclude"] as Array))
 	var hit := _space.intersect_ray(query)
 	var compression := 0.0
 	var best := {}
@@ -1800,7 +2740,8 @@ func _wheel_contact(chassis: RigidBody3D, entry: Dictionary) -> Dictionary:
 		var dir := (sus * cos(angle) + fwd * sin(angle)).normalized()
 		if ring_ray_belongs_to_suspension(dir, down, float(entry["sus_sector"])):
 			continue
-		query = PhysicsRayQueryParameters3D.create(centre, centre + dir * ring_reach, 1, exclude)
+		query.from = centre
+		query.to = centre + dir * ring_reach
 		hit = _space.intersect_ray(query)
 		if hit.is_empty():
 			continue
@@ -1818,8 +2759,7 @@ func _apply_wheel(veh: Dictionary, entry: Dictionary, delta: float) -> void:
 	entry["contact"] = false
 	entry["push"] = 0.0
 	entry["ray_depth"] = 0.0
-	for key in ["dbg_depth", "dbg_normal_y", "dbg_long", "dbg_lat", "dbg_along", "dbg_side"]:
-		entry[key] = 0.0
+	# （调试量只给 tools/probe_flat.gd 用；每轮每 tick 写 6 次字典是白开销，改成按需读）
 	var chassis: RigidBody3D = veh["chassis"]
 	var node: Node3D = entry["node"]
 	if not is_instance_valid(node) or _space == null or delta <= 0.0:
@@ -1886,14 +2826,11 @@ func _apply_wheel(veh: Dictionary, entry: Dictionary, delta: float) -> void:
 		long_force = clampf(drive, -long_cap, long_cap)
 	var total := best_normal * push + fwd_now * long_force + axle_now * lat_force
 	chassis.apply_force(total, best_point - chassis.global_position)
+	# 缓存给"人机隔帧复用"用（见 `_drive_vehicle`）
+	entry["last_force"] = total
+	entry["last_point"] = best_point
 	# 调试用：把这一帧的接触/轮胎量记在 entry 上（`tools/probe_flat.gd` 会打出来，
 	# 用来定位"静止自己走"/"超过极速"这类问题 —— 看哪个量在静止时就不为零）。
-	entry["dbg_depth"] = depth
-	entry["dbg_normal_y"] = best_normal.y
-	entry["dbg_long"] = long_force
-	entry["dbg_lat"] = lat_force
-	entry["dbg_along"] = along
-	entry["dbg_side"] = side
 	entry["push"] = push
 
 
@@ -1957,9 +2894,19 @@ func _process(delta: float) -> void:
 	if _hud_timer >= 0.25:
 		_hud_timer = 0.0
 		_update_hud()
+	if _prof_on:
+		_prof_report -= delta
+		if _prof_report <= 0.0:
+			_prof_report = 1.0
+			_prof_dump()
 	if _chassis == null or _camera == null:
 		return
-	# 环视相机：以车为圆心，鼠标控制 yaw/pitch（yaw 相对车头，pitch 相对**地面**），滚轮控制距离。
+	# 开镜：右键按住（InputMap 动作，无头测试也能按）。视野每帧朝目标值靠拢。
+	_scoped = Input.is_action_pressed(SCOPE_ACTION)
+	_update_camera_fov(delta)
+	_update_scope_view()
+	# 环视相机：以车为圆心，鼠标控制 yaw/pitch（yaw 相对车头，pitch 相对**地面**），
+	# 距离**固定**（CAMERA_DISTANCE）—— 远近由视野（滚轮 / 开镜倍数）决定，见 `target_fov()`。
 	# ⚠️ 整条视线都必须在**世界系**里算：
 	#   先把车头投到地面上得到水平方向，再绕世界 UP 转 yaw，最后绕世界水平横轴转 pitch。
 	# 以前的写法（`chassis.basis * Basis(BACK, pitch) * x`）是拿**车体**的上下当极轴 ——
@@ -1985,18 +2932,26 @@ func _process(delta: float) -> void:
 	# 最高点在当前姿态下算（把本地包围盒 8 个角变换到世界取最大 y），所以车翻滚/侧倾时
 	# 中心跟着车走，不会突然窜到天上；重心也按当前姿态变换，翻过来时中心就贴在车上。
 	var target := _camera_center(chassis_xform)
-	var desired := target - look_dir * _camera_distance
+	var desired := target - look_dir * CAMERA_DISTANCE
 	# 别让相机穿到墙外：从车心往相机方向打一条射线，撞到就贴上去
 	var space := get_world_3d().direct_space_state
 	if space != null:
+		# 排除自己车的车体**和受击盒**：受击盒就贴在车身上，不排掉的话镜头会被
+		# "自己的轮胎盒"挡住、一下拽到车里（用户报的"画面突然闪一下别的视角又回来"）。
+		var exclude: Array[RID] = [_chassis.get_rid()]
+		if _player_rig != null and _player_rig.hitboxes != null:
+			exclude.append(_player_rig.hitboxes.get_rid())
 		var query := PhysicsRayQueryParameters3D.create(target, desired)
-		query.exclude = [_chassis.get_rid()]
+		query.exclude = exclude
 		var hit := space.intersect_ray(query)
 		if hit.has("position"):
-			desired = (hit["position"] as Vector3) + look_dir * 0.25
+			var clearance := target.distance_to(hit["position"]) - 0.25
+			# ⚠️ 至少留 CAMERA_MIN_DISTANCE：贴太近时 `look_at` 的方向几乎是零向量，
+			# 相机朝向会瞬间失效 → 画面闪一下别的视角再回来（就是这一帧的 bug）。
+			desired = target - look_dir * clampf(clearance, CAMERA_MIN_DISTANCE, CAMERA_DISTANCE)
 	# 不做平滑（用户要"关了平滑视角"）：相机硬贴在环视位置上，转视角没有拖影
 	_camera.global_position = desired
-	if _camera.global_position.distance_to(target) > 0.01:
+	if _camera.global_position.distance_to(target) > CAMERA_MIN_DISTANCE * 0.5:
 		_camera.look_at(target, Vector3.UP)
 
 
@@ -2006,6 +2961,79 @@ func _process(delta: float) -> void:
 ## 抽成静态函数是为了让这条语义能被测试钉住（见 test_robot.gd）。
 static func camera_yaw_reference(flat_forward: Vector3, follow: bool) -> Vector3:
 	return flat_forward if follow else Vector3.RIGHT
+
+
+## ── 镜头：视野（FOV）/ 开镜倍率 ─────────────────────────────────────────────
+## 用户定的规则：**滚轮调视野，不调远近**（相机和车的距离固定）；**右键按住开镜**，
+## 开镜时滚轮调 2~16 倍，倍率在这一场里记着（收镜不清零，下次按下去还是它）。
+## 为什么用视野而不是距离：距离一变，"环视中心"到眼睛的臂长就变了，瞄准的手感和
+## 遮挡关系全跟着漂；视野只改画面的广角/长焦，相机位置不动。
+
+## 开镜后的视野：倍率越大视野越窄（2 倍镜 = 视野减半）。纯函数，测试直接打它。
+static func scoped_fov(hip_fov: float, zoom: float) -> float:
+	return clampf(hip_fov / maxf(1.0, zoom), 1.0, 179.0)
+
+
+## 滚轮一格（正 = 往前滚 = 放大）：腰射视野变小，夹在 FOV_MIN~FOV_MAX。
+static func fov_after_wheel(current: float, notches: int) -> float:
+	return clampf(current - float(notches) * CAMERA_FOV_STEP, CAMERA_FOV_MIN, CAMERA_FOV_MAX)
+
+
+## 滚轮一格（正 = 往前滚 = 放大）：倍率按**乘法**走（2→2.5→3.1→…→16），
+## 各倍率下"一格"的观感一致；夹在 SCOPE_ZOOM_MIN~MAX。
+static func zoom_after_wheel(current: float, notches: int) -> float:
+	return clampf(
+		current * pow(SCOPE_ZOOM_STEP, float(notches)), SCOPE_ZOOM_MIN, SCOPE_ZOOM_MAX
+	)
+
+
+## 这一帧该用的视野：开镜 = 腰射视野 ÷ 倍率，没开镜 = 腰射视野。
+func target_fov() -> float:
+	return scoped_fov(_fov, _scope_zoom) if _scoped else _fov
+
+
+## 鼠标灵敏度要跟着**视野**缩放（用户 2026-10-18 提的：不缩放的话开镜后手感很怪）。
+##
+## 为什么用 tan(FOV/2) 的比例而不是 FOV 的比例：投影的缩放本身就是 1/tan(FOV/2)，
+## 所以按 `tan(当前/2) / tan(参考/2)` 缩完，"一个鼠标计数走过的屏幕像素"在任何倍率下都一样 ——
+## 16 倍镜下也能稳稳跟枪，不会轻轻一动画面就飞出去。参考视野 = 没开镜时的默认视野，
+## 也就是设置里那条灵敏度滑条标定的那个视野。
+##
+## 下限 0.02 防止极端倍率下灵敏度变成 0（鼠标像卡住）。
+static func look_sensitivity_scale(view_fov: float, reference_fov := CAMERA_FOV) -> float:
+	var reference := tan(deg_to_rad(maxf(1.0, reference_fov)) * 0.5)
+	if reference <= 0.000001:
+		return 1.0
+	return maxf(0.02, tan(deg_to_rad(clampf(view_fov, 1.0, 179.0)) * 0.5) / reference)
+
+
+## 开镜时显示镜筒遮罩 + 倍率滑条，同时把原来的白色准星收起来（遮罩里有分划）。
+func _update_scope_view() -> void:
+	if _scope_overlay != null:
+		_scope_overlay.set_state(_scoped, _scope_zoom, SCOPE_ZOOM_MIN, SCOPE_ZOOM_MAX)
+	if _crosshair != null:
+		_crosshair.visible = not _scoped
+
+
+## 滚轮：开镜时调倍率、平时调腰射视野。正数 = 往前滚 = 放大。
+func zoom_wheel(notches: int) -> void:
+	if notches == 0:
+		return
+	if _scoped:
+		_scope_zoom = zoom_after_wheel(_scope_zoom, notches)
+	else:
+		_fov = fov_after_wheel(_fov, notches)
+
+
+## 把 `_camera.fov` 朝 `target_fov()` 推（CAMERA_FOV_SPEED = 0 = 瞬间到位）。
+func _update_camera_fov(delta: float) -> void:
+	if _camera == null:
+		return
+	var target := target_fov()
+	if CAMERA_FOV_SPEED <= 0.0:
+		_camera.fov = target
+		return
+	_camera.fov = move_toward(_camera.fov, target, CAMERA_FOV_SPEED * delta)
 
 
 ## 环视中心（世界坐标）：重心给 x/z，最高点 + CAMERA_CENTER_CLEARANCE 给 y。
@@ -2050,9 +3078,18 @@ func _update_speedometer() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	# 鼠标 = 自由环视（相对车头）；滚轮 = 变焦。开车和瞄准都用它。
+	# 鼠标 = 自由环视（相对车头）；滚轮 = 视野（平时）/ 开镜倍率（按住右键时）。
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		var sensitivity := GameSettings.mouse_sensitivity()  # 游戏设置里的灵敏度
+		# 忽略"离谱"的鼠标跳变：切窗口 / 系统把光标拉回中心 / 抓取模式刚生效时，系统会送来一帧
+		# 巨大的 relative（几百上千像素），表现就是**视角突然甩到别处再回来**（用户报的"闪烁"）。
+		# 正常的快速甩枪一帧也就几十像素，220 足够宽。
+		if absf(event.relative.x) > MOUSE_MAX_DELTA or absf(event.relative.y) > MOUSE_MAX_DELTA:
+			return
+		var base := GameSettings.mouse_sensitivity()  # 游戏设置里的灵敏度
+		# 灵敏度跟着**当前**视野缩放（不是目标值）：看到多窄，就按多窄的手感转，
+		# 这样调 FOV（滚轮）和开镜（倍率）都不会出现"一动就飞"或"怎么推都不动"。
+		var view_fov := _camera.fov if _camera != null else _fov
+		var sensitivity := base * look_sensitivity_scale(view_fov)
 		_camera_yaw = wrapf(
 			_camera_yaw - event.relative.x * sensitivity, -180.0, 180.0
 		)
@@ -2061,11 +3098,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		)
 		return
 	if event is InputEventMouseButton and event.pressed:
+		# 往前滚 = 放大：平时 FOV 变小，开镜时倍率变大（见 `zoom_wheel()`）
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			_camera_distance = maxf(CAMERA_MIN_DISTANCE, _camera_distance - 0.8)
+			zoom_wheel(1)
 			return
 		if event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			_camera_distance = minf(CAMERA_MAX_DISTANCE, _camera_distance + 0.8)
+			zoom_wheel(-1)
 			return
 	if event is InputEventKey and event.pressed:
 		# 找出生点的推车键（和机库一样）：↑↓←→ + < >。允许按住连发（自己节流，
@@ -2089,7 +3127,25 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event.keycode == KEY_O:
 			_toggle_com_marker()
 			return
+		# F1 = 显示坐标（米）：手动摆放对战场地（data/arena/battle_layout.txt）时抄数字用
+		if event.keycode == KEY_F1:
+			_show_coords = not _show_coords
+			return
+		# F9 = 帧预算探针：每秒在控制台打印**最慢那一帧**拆到各段的耗时
+		# （交火掉帧时用，看是轮胎 / 转塔 / 开火 / 伤害结算哪一段）
+		if event.keycode == KEY_F9:
+			_prof_on = not _prof_on
+			_prof_worst = {}
+			_prof_worst_ms = 0.0
+			_prof_report = 1.0
+			print("[探针] %s（每秒打印一次最慢帧的拆解）" % ("已开启" if _prof_on else "已关闭"))
+			return
 		if event.keycode == KEY_ESCAPE:
-			# 走之前把鼠标放出来，否则回到主界面点不到东西
-			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-			get_tree().change_scene_to_file(MENU_SCENE)
+			# ESC = 暂停 + 弹菜单（返回战斗 / 游戏设置 / 自爆 / 返回主界面）。
+			# 注意：暂停之后这一帧的输入就由菜单自己处理了（菜单是 PROCESS_MODE_ALWAYS）。
+			_open_pause_menu()
+			return
+		# Q = 手动标记敌人（对战模式覆盖 `_on_mark_pressed()`；测试场里什么也不做）
+		if event.is_action_pressed(MARK_ACTION):
+			_on_mark_pressed()
+			return

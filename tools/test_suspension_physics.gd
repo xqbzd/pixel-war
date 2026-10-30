@@ -64,7 +64,7 @@ func _vehicle(mass: float, count: int, rays: int, position: Vector3, travel := 1
 	body.add_child(shape)
 	_bench.add_child(body)
 	body.position = position
-	var def := _bench._library.get_def("wheel_axle_2x2")
+	var def := _bench._library.get_def("toy_wheel_2x2")
 	def.wheel_rays = rays
 	def.wheel_suspension_travel = travel
 	var specs := []
